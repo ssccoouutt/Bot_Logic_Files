@@ -1,0 +1,768 @@
+#!/usr/bin/env python3
+"""
+Chrome Browser Automation Bot - Fixed with Chrome Installation
+"""
+
+import sys
+import os
+import subprocess
+import platform
+import time
+import io
+import logging
+import json
+import re
+import zipfile
+import shutil
+import requests
+import stat
+from pathlib import Path
+
+# ========== Chrome Installation ==========
+def install_chrome():
+    """Force install Google Chrome on the system"""
+    system = platform.system().lower()
+    print("="*60)
+    print("INSTALLING GOOGLE CHROME")
+    print("="*60)
+    
+    if system == "linux":
+        print("Detected Linux system...")
+        
+        # Method 1: Try official Google repository
+        print("\n[1] Trying official Google Chrome repository...")
+        try:
+            # Add Google Chrome repository
+            subprocess.run([
+                "wget", "-q", "-O-", "https://dl.google.com/linux/linux_signing_key.pub"
+            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+            subprocess.run([
+                "sh", "-c", 
+                'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list'
+            ], check=True)
+            
+            subprocess.run(["apt-get", "update"], check=True)
+            subprocess.run(["apt-get", "install", "-y", "google-chrome-stable"], check=True)
+            print("✓ Chrome installed via official repository")
+            return True
+        except Exception as e:
+            print(f"✗ Method 1 failed: {e}")
+        
+        # Method 2: Download and install .deb directly
+        print("\n[2] Downloading Chrome .deb directly...")
+        try:
+            subprocess.run([
+                "wget", "-q", "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb",
+                "-O", "/tmp/chrome.deb"
+            ], check=True)
+            
+            subprocess.run([
+                "apt-get", "install", "-y", "/tmp/chrome.deb"
+            ], check=True)
+            print("✓ Chrome installed via direct .deb")
+            return True
+        except Exception as e:
+            print(f"✗ Method 2 failed: {e}")
+        
+        # Method 3: Install from snap (for Ubuntu/Debian)
+        print("\n[3] Trying snap installation...")
+        try:
+            subprocess.run(["snap", "install", "chromium"], check=True)
+            # Create symlink for compatibility
+            subprocess.run(["ln", "-sf", "/snap/bin/chromium", "/usr/bin/google-chrome-stable"], check=True)
+            print("✓ Chromium installed via snap (symlinked as google-chrome-stable)")
+            return True
+        except Exception as e:
+            print(f"✗ Method 3 failed: {e}")
+        
+        # Method 4: Manual download and extraction
+        print("\n[4] Manual Chrome download and setup...")
+        try:
+            # Download Chrome
+            chrome_url = "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
+            response = requests.get(chrome_url, stream=True)
+            
+            with open("/tmp/chrome_pkg.deb", "wb") as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            
+            # Extract .deb manually
+            subprocess.run(["dpkg-deb", "-x", "/tmp/chrome_pkg.deb", "/tmp/chrome_extract"], check=True)
+            
+            # Find chrome binary
+            chrome_binary = None
+            for root, dirs, files in os.walk("/tmp/chrome_extract"):
+                for file in files:
+                    if file == "chrome" or file == "google-chrome-stable":
+                        chrome_binary = os.path.join(root, file)
+                        break
+            
+            if chrome_binary and os.path.exists(chrome_binary):
+                # Copy to /usr/bin
+                target_path = "/usr/bin/google-chrome-stable"
+                shutil.copy2(chrome_binary, target_path)
+                os.chmod(target_path, stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
+                
+                # Install dependencies
+                subprocess.run([
+                    "apt-get", "install", "-y",
+                    "libx11-6", "libxcomposite1", "libxdamage1", "libxext6",
+                    "libxfixes3", "libxrandr2", "libgbm1", "libasound2",
+                    "libatk-bridge2.0-0", "libgtk-3-0"
+                ], check=False)
+                
+                print(f"✓ Chrome manually installed to {target_path}")
+                return True
+        except Exception as e:
+            print(f"✗ Method 4 failed: {e}")
+    
+    elif system == "darwin":
+        print("macOS detected - Chrome should be installed manually")
+        print("Download from: https://www.google.com/chrome/")
+        return False
+    
+    elif system == "windows":
+        print("Windows detected - Chrome should be installed manually")
+        print("Download from: https://www.google.com/chrome/")
+        return False
+    
+    print("\n" + "="*60)
+    print("WARNING: Could not install Chrome automatically")
+    print("Please install Chrome manually and re-run the script")
+    print("="*60)
+    return False
+
+def verify_chrome_installation():
+    """Verify Chrome is installed and find its path"""
+    system = platform.system().lower()
+    chrome_paths = []
+    
+    if system == "linux":
+        chrome_paths = [
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/google-chrome",
+            "/usr/bin/chromium-browser",
+            "/usr/bin/chromium",
+            "/usr/local/bin/google-chrome-stable",
+            "/opt/google/chrome/google-chrome",
+            "/snap/bin/chromium",
+            "/snap/bin/chrome"
+        ]
+    elif system == "darwin":
+        chrome_paths = [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium"
+        ]
+    elif system == "windows":
+        chrome_paths = [
+            "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+            "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"
+        ]
+    
+    for path in chrome_paths:
+        if os.path.exists(path):
+            print(f"✓ Found Chrome at: {path}")
+            return path
+    
+    print("✗ Chrome not found in standard locations")
+    return None
+
+def install_dependencies():
+    """Install required packages"""
+    print("\n" + "="*60)
+    print("INSTALLING DEPENDENCIES")
+    print("="*60)
+    
+    system = platform.system().lower()
+    
+    # Install Python packages
+    python_packages = [
+        "selenium>=4.15.0",
+        "webdriver-manager",
+        "python-telegram-bot==20.0",
+        "pillow",
+        "nest_asyncio",
+        "requests"
+    ]
+    
+    print("\nInstalling Python packages...")
+    for package in python_packages:
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+            print(f"  ✓ {package}")
+        except Exception as e:
+            print(f"  ✗ {package}: {e}")
+    
+    # Install system dependencies for Linux
+    if system == "linux":
+        print("\nInstalling system dependencies...")
+        deps = [
+            "wget", "unzip", "xvfb", "libxi6", 
+            "libgconf-2-4", "libvulkan1", 
+            "mesa-vulkan-drivers", "libx11-xcb1",
+            "libxcb-dri3-0", "libdrm2", "libgbm1",
+            "libasound2", "libatk-bridge2.0-0",
+            "libgtk-3-0"
+        ]
+        
+        try:
+            subprocess.run(["apt-get", "update"], check=True)
+            subprocess.run(["apt-get", "install", "-y"] + deps, check=True)
+            print("  ✓ System dependencies installed")
+        except Exception as e:
+            print(f"  ✗ System dependencies: {e}")
+    
+    return True
+
+# ========== Main Application ==========
+# Force install Chrome first
+chrome_installed = False
+chrome_path = verify_chrome_installation()
+
+if not chrome_path:
+    print("\nChrome not found. Attempting to install...")
+    chrome_installed = install_chrome()
+    if chrome_installed:
+        chrome_path = verify_chrome_installation()
+else:
+    chrome_installed = True
+
+if not chrome_installed or not chrome_path:
+    print("\n" + "="*60)
+    print("ERROR: Google Chrome is required but not installed!")
+    print("Please install Chrome manually:")
+    print("  Linux:   sudo apt-get install -y google-chrome-stable")
+    print("  macOS:   brew install --cask google-chrome")
+    print("  Windows: Download from https://www.google.com/chrome/")
+    print("="*60)
+    sys.exit(1)
+
+# Install other dependencies
+install_dependencies()
+
+# Now import the required modules
+try:
+    from PIL import Image, ImageDraw
+    from telegram import Update, InputFile
+    from telegram.ext import (
+        Application,
+        CommandHandler,
+        MessageHandler,
+        filters,
+        ContextTypes,
+    )
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.common.action_chains import ActionChains
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.common.keys import Keys
+    import nest_asyncio
+    nest_asyncio.apply()
+except ImportError as e:
+    print(f"\nError importing modules: {e}")
+    print("Trying to install missing packages...")
+    install_dependencies()
+    
+    # Retry imports
+    from PIL import Image, ImageDraw
+    from telegram import Update, InputFile
+    from telegram.ext import (
+        Application,
+        CommandHandler,
+        MessageHandler,
+        filters,
+        ContextTypes,
+    )
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.common.action_chains import ActionChains
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.common.keys import Keys
+    import nest_asyncio
+    nest_asyncio.apply()
+
+# Configuration
+TOKEN = "8272034014:AAHFfzPCvKiq8Oepl7TqZY9OtoZi4DoBMwg"
+USER_DATA_DIR = os.path.join(os.path.expanduser("~"), ".chrome-browser-bot", "user-data")
+ZIP_FILENAME = "chrome_browser_profile.zip"
+DOWNLOADS_DIR = os.path.join(os.path.expanduser("~"), ".chrome-browser-bot", "downloads")
+
+# Create directories
+os.makedirs(USER_DATA_DIR, exist_ok=True)
+os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+
+# Setup logging
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+def zipdir(src_dir, zipfilename):
+    """Zip directory excluding lock files"""
+    with zipfile.ZipFile(zipfilename, "w", zipfile.ZIP_DEFLATED) as zf:
+        for root, dirs, files in os.walk(src_dir):
+            for file in files:
+                if (file.startswith("Singleton") or 
+                    file.endswith(".lock") or 
+                    file.endswith("Lock") or 
+                    file.endswith("Socket")):
+                    continue
+                filepath = os.path.join(root, file)
+                arcname = os.path.relpath(filepath, src_dir)
+                try:
+                    zf.write(filepath, arcname=arcname)
+                except Exception as e:
+                    print(f"Skipping {filepath}: {e}")
+
+def load_profile_zip(file_path):
+    """Load browser profile from zip file"""
+    if os.path.exists(USER_DATA_DIR):
+        shutil.rmtree(USER_DATA_DIR)
+    os.makedirs(USER_DATA_DIR, exist_ok=True)
+    
+    with zipfile.ZipFile(file_path, "r") as zf:
+        for member in zf.namelist():
+            if ("/Singleton" in member or 
+                member.endswith("SingletonLock") or 
+                member.endswith("SingletonSocket") or 
+                member.endswith(".lock")):
+                continue
+            try:
+                zf.extract(member, USER_DATA_DIR)
+            except Exception as e:
+                print(f"Skipping {member}: {e}")
+    
+    print(f"[INFO] Browser profile extracted to {USER_DATA_DIR}")
+
+def download_any_url(url, save_path):
+    """Download file from URL"""
+    response = requests.get(url, stream=True)
+    response.raise_for_status()
+    
+    with open(save_path, "wb") as f:
+        for chunk in response.iter_content(chunk_size=8192):
+            f.write(chunk)
+
+class BrowserBot:
+    def __init__(self):
+        if os.path.exists(ZIP_FILENAME):
+            load_profile_zip(ZIP_FILENAME)
+        
+        self.driver = None
+        self.current_url = "chrome://newtab/"
+        self.chrome_path = chrome_path
+        self.start_driver()
+
+    def start_driver(self):
+        """Initialize Chrome WebDriver - SIMPLIFIED VERSION"""
+        if self.driver:
+            try:
+                self.driver.quit()
+            except Exception:
+                pass
+        
+        chrome_options = Options()
+        
+        # ALWAYS set the binary location to the verified chrome path
+        chrome_options.binary_location = self.chrome_path
+        print(f"Using Chrome at: {self.chrome_path}")
+        
+        # Platform-specific arguments
+        system = platform.system().lower()
+        if system == "linux":
+            chrome_options.add_argument("--no-sandbox")
+            chrome_options.add_argument("--disable-dev-shm-usage")
+            chrome_options.add_argument("--disable-gpu")
+        
+        # Common options
+        chrome_options.add_argument("--window-size=1920,1080")
+        chrome_options.add_argument("--remote-debugging-port=9222")
+        chrome_options.add_argument("--headless=new")
+        chrome_options.add_argument(f"--user-data-dir={USER_DATA_DIR}")
+        chrome_options.add_argument("--profile-directory=Default")
+        chrome_options.add_argument("--restore-last-session")
+        
+        # Download preferences
+        prefs = {
+            "download.default_directory": DOWNLOADS_DIR,
+            "download.prompt_for_download": False,
+            "download.directory_upgrade": True,
+            "safebrowsing.enabled": True,
+        }
+        chrome_options.add_experimental_option("prefs", prefs)
+        
+        # Add additional options for stability
+        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        chrome_options.add_experimental_option('useAutomationExtension', False)
+        
+        # For headless mode
+        chrome_options.add_argument("--disable-software-rasterizer")
+        chrome_options.add_argument("--disable-extensions")
+        
+        try:
+            # SIMPLE APPROACH: Use webdriver-manager with explicit binary location
+            from selenium.webdriver.chrome.service import Service as ChromeService
+            from webdriver_manager.chrome import ChromeDriverManager
+            
+            print("Setting up ChromeDriver via webdriver-manager...")
+            service = ChromeService(ChromeDriverManager().install())
+            self.driver = webdriver.Chrome(service=service, options=chrome_options)
+            print("✓ Chrome started successfully")
+            
+        except Exception as e:
+            print(f"webdriver-manager failed: {e}")
+            print("Trying alternative driver setup...")
+            
+            try:
+                # Try with Service() and verbose logging
+                service = Service(verbose=True)
+                self.driver = webdriver.Chrome(service=service, options=chrome_options)
+                print("✓ Chrome started with Service()")
+            except Exception as e2:
+                print(f"Service() failed: {e2}")
+                print("Trying direct ChromeDriver...")
+                
+                try:
+                    # Last resort: direct webdriver.Chrome()
+                    self.driver = webdriver.Chrome(options=chrome_options)
+                    print("✓ Chrome started directly")
+                except Exception as e3:
+                    print(f"All methods failed: {e3}")
+                    print("\n" + "="*60)
+                    print("DIAGNOSTIC INFORMATION:")
+                    print(f"Chrome path: {self.chrome_path}")
+                    print(f"Exists: {os.path.exists(self.chrome_path)}")
+                    if os.path.exists(self.chrome_path):
+                        print(f"Executable: {os.access(self.chrome_path, os.X_OK)}")
+                        print(f"File size: {os.path.getsize(self.chrome_path)}")
+                    
+                    # Test Chrome binary
+                    print("\nTesting Chrome binary...")
+                    try:
+                        result = subprocess.run([self.chrome_path, "--version"], 
+                                              capture_output=True, text=True, timeout=5)
+                        print(f"Chrome version test: {result.stdout}")
+                    except Exception as chrome_test_error:
+                        print(f"Chrome test failed: {chrome_test_error}")
+                    
+                    print("="*60)
+                    raise
+
+        self.driver.get(self.current_url)
+        time.sleep(3)
+
+    def soft_restart(self):
+        """Restart the browser"""
+        self.start_driver()
+
+    def capture_screenshot(self):
+        """Capture screenshot of current page"""
+        screenshot_bytes = self.driver.get_screenshot_as_png()
+        img = Image.open(io.BytesIO(screenshot_bytes))
+        img_bytes = io.BytesIO()
+        img.save(img_bytes, format="PNG")
+        img_bytes.seek(0)
+        return img_bytes
+
+    def mark_screenshot(self, screenshot_bytes, click_x=None, click_y=None):
+        """Add marker to screenshot at click coordinates"""
+        img = Image.open(io.BytesIO(screenshot_bytes))
+        draw = ImageDraw.Draw(img)
+        
+        if click_x is not None and click_y is not None:
+            dot_radius = 10
+            draw.ellipse(
+                [(click_x - dot_radius, click_y - dot_radius), 
+                 (click_x + dot_radius, click_y + dot_radius)],
+                fill=(255, 0, 0),
+            )
+            draw.ellipse(
+                [(click_x - dot_radius - 2, click_y - dot_radius - 2),
+                 (click_x + dot_radius + 2, click_y + dot_radius + 2)],
+                outline=(255, 255, 255),
+                width=2,
+            )
+        
+        img_bytes = io.BytesIO()
+        img.save(img_bytes, format="PNG")
+        img_bytes.seek(0)
+        return img_bytes
+
+    def get_tab_titles(self):
+        """Get list of all open tabs"""
+        titles = []
+        curr_handle = self.driver.current_window_handle
+        handles = self.driver.window_handles
+        
+        for i, h in enumerate(handles):
+            self.driver.switch_to.window(h)
+            try:
+                title = self.driver.title
+            except Exception as e:
+                title = f"[UNKNOWN] {str(e)}"
+            
+            url = ""
+            try:
+                url = self.driver.current_url
+            except Exception:
+                url = ""
+            
+            titles.append(f"{i}: {title}\n    {url}")
+        
+        self.driver.switch_to.window(curr_handle)
+        return "\n".join(titles)
+
+    def switch_to_tab(self, idx: int):
+        """Switch to specific tab by index"""
+        handles = self.driver.window_handles
+        if 0 <= idx < len(handles):
+            self.driver.switch_to.window(handles[idx])
+            return f"Switched to tab {idx}: {self.driver.title}"
+        else:
+            return f"Tab index {idx} out of range ({len(handles)} tabs open)."
+
+    def refresh_tab(self):
+        """Refresh current tab"""
+        self.driver.refresh()
+        time.sleep(1)
+        return f"Refreshed: {self.driver.title or self.driver.current_url}"
+
+    def open_new_tab(self, url):
+        """Open new tab with URL"""
+        self.driver.execute_script(f"window.open('{url}', '_blank');")
+        time.sleep(1)
+        self.driver.switch_to.window(self.driver.window_handles[-1])
+        return f"Opened and switched to new tab: {url}"
+
+    def extract_text_from_brackets(self, text):
+        """Extract text within square brackets"""
+        if "[" in text and "]" in text:
+            start, end = text.rfind("[") + 1, text.rfind("]")
+            if start < end:
+                return text[start:end]
+        return None
+
+    def process_action(self, action_text):
+        """Process user action command - EXACTLY AS YOUR ORIGINAL"""
+        try:
+            if "," in action_text:
+                parts = action_text.split(maxsplit=1)
+                x, y = map(int, parts[0].split(","))
+                text_to_type = None
+                
+                if len(parts) > 1:
+                    bracket_text = self.extract_text_from_brackets(parts[1])
+                    text_to_type = bracket_text if bracket_text else parts[1]
+                
+                actions = ActionChains(self.driver)
+                actions.move_by_offset(x, y).click().perform()
+                
+                if text_to_type:
+                    for char in text_to_type:
+                        if char == "\n":
+                            actions.key_down(Keys.SHIFT).send_keys(Keys.ENTER).key_up(Keys.SHIFT).perform()
+                        else:
+                            actions.send_keys(char).perform()
+                        time.sleep(0.05)
+                
+                actions.move_by_offset(-x, -y).perform()
+                msg = f"Clicked at ({x},{y})"
+                if text_to_type:
+                    msg += f" and typed:\n{text_to_type}"
+                
+                time.sleep(2)
+                screenshot_bytes = self.driver.get_screenshot_as_png()
+                marked = self.mark_screenshot(screenshot_bytes, x, y)
+                return msg, marked
+            
+            return (
+                "🌐 Chrome Browser Automation Bot\n\n"
+                "Commands:\n"
+                "- x,y [text] → Click at (x,y) and type text\n"
+                "- x,y → Click at (x,y)\n"
+                "- /newtab <url>   Open new tab with URL\n"
+                "- /switch <tab>   Switch to tab index\n"
+                "- /tabs           List open tabs\n"
+                "- /save           Download browser profile\n"
+                "- /load <link>    Restore profile from link\n"
+                "- /refresh        Refresh current tab\n"
+                "- /get            Screenshot\n"
+                "- /cload <cookie link> Inject cookies and go to google.com\n"
+            ), None
+        
+        except Exception as e:
+            logger.error(f"Error processing action: {e}")
+            return f"Error occurred: {str(e)}", None
+
+# Initialize bot instance
+bot_instance = BrowserBot()
+
+# Telegram bot handlers - EXACTLY AS YOUR ORIGINAL
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🌐 Chrome Browser Automation Bot\n\n"
+        "Commands:\n"
+        "/newtab <url>   -- Open new tab\n"
+        "/switch <n>     -- Switch tab\n"
+        "/tabs           -- List tabs\n"
+        "/save           -- Download profile\n"
+        "/load <link>    -- Restore profile\n"
+        "/refresh        -- Refresh tab\n"
+        "/get            -- Screenshot\n"
+        "/cload <cookie link> -- Inject cookies & load google.com"
+    )
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg, data = bot_instance.process_action(update.message.text.strip())
+    if data:
+        await update.message.reply_photo(photo=InputFile(data), caption=msg)
+    else:
+        await update.message.reply_text(msg)
+
+async def save_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if os.path.exists(ZIP_FILENAME):
+            os.remove(ZIP_FILENAME)
+        
+        zipdir(USER_DATA_DIR, ZIP_FILENAME)
+        
+        await update.message.reply_document(
+            document=open(ZIP_FILENAME, "rb"),
+            filename=ZIP_FILENAME,
+            caption="🔑 Download and restore profile with /load <link>",
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Failed to save profile: {e}")
+
+async def get_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = bot_instance.capture_screenshot()
+    await update.message.reply_photo(photo=InputFile(data), caption="📸 Screenshot")
+
+async def tabs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Open tabs:\n" + bot_instance.get_tab_titles())
+
+async def switch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    parts = update.message.text.strip().split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        return await update.message.reply_text("Usage: /switch <tab index>")
+    await update.message.reply_text(bot_instance.switch_to_tab(int(parts[1])))
+
+async def newtab(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    parts = update.message.text.strip().split(None, 1)
+    if len(parts) < 2 or not parts[1].startswith("http"):
+        return await update.message.reply_text("Usage: /newtab <url>")
+    await update.message.reply_text(bot_instance.open_new_tab(parts[1]))
+
+async def refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(bot_instance.refresh_tab())
+
+async def load_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    parts = update.message.text.strip().split(None, 1)
+    if len(parts) != 2 or not parts[1].startswith("http"):
+        return await update.message.reply_text("Usage: /load <zip link>")
+    
+    await update.message.reply_text("⏳ Downloading profile...")
+    try:
+        download_any_url(parts[1], ZIP_FILENAME)
+        load_profile_zip(ZIP_FILENAME)
+        bot_instance.soft_restart()
+        await update.message.reply_text("✅ Profile loaded and browser restarted")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Load failed: {e}")
+
+async def cload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    parts = update.message.text.strip().split(None, 1)
+    if len(parts) != 2 or not parts[1].startswith("http"):
+        return await update.message.reply_text("Usage: /cload <cookie txt/json link>")
+    
+    url = parts[1]
+    save_path = "/tmp/google_cookies.txt"
+    await update.message.reply_text("⏬ Downloading cookies...")
+    
+    try:
+        download_any_url(url, save_path)
+        cookies = []
+        s = open(save_path).read().strip()
+        
+        if s and s[0] in "[{":
+            cookies = json.loads(s)
+        else:
+            for line in s.split("\n"):
+                if not line or line.startswith("#"):
+                    continue
+                try:
+                    d, flag, p, sec, exp, n, v = line.split("\t")
+                    c = {
+                        "domain": d.lstrip("."),
+                        "name": n,
+                        "value": v,
+                        "path": p,
+                        "secure": sec.upper() == "TRUE",
+                    }
+                    if exp.replace(".", "", 1).isdigit():
+                        c["expiry"] = int(float(exp))
+                    cookies.append(c)
+                except:
+                    continue
+        
+        if not cookies:
+            return await update.message.reply_text("❌ No cookies found")
+        
+        bot_instance.driver.get("https://google.com")
+        time.sleep(2)
+        bot_instance.driver.delete_all_cookies()
+        
+        cnt = 0
+        for c in cookies:
+            for k in ["sameSite", "id", "storeId", "hostOnly", "httpOnly"]:
+                c.pop(k, None)
+            if "expiry" in c:
+                try:
+                    c["expiry"] = int(c["expiry"])
+                except:
+                    c.pop("expiry")
+            try:
+                bot_instance.driver.add_cookie(c)
+                cnt += 1
+            except:
+                pass
+        
+        bot_instance.driver.get("https://google.com")
+        time.sleep(2)
+        await update.message.reply_text(f"✅ {cnt} cookies injected and loaded Google.com")
+    except Exception as e:
+        await update.message.reply_text(f"❌ cload failed: {e}")
+
+def run_bot():
+    """Start the Telegram bot"""
+    app = Application.builder().token(TOKEN).build()
+    
+    # Add command handlers
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("save", save_session))
+    app.add_handler(CommandHandler("get", get_screenshot))
+    app.add_handler(CommandHandler("tabs", tabs))
+    app.add_handler(CommandHandler("switch", switch))
+    app.add_handler(CommandHandler("newtab", newtab))
+    app.add_handler(CommandHandler("refresh", refresh))
+    app.add_handler(CommandHandler("load", load_command))
+    app.add_handler(CommandHandler("cload", cload_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    print("\n" + "="*60)
+    print("BOT STARTING SUCCESSFULLY!")
+    print("="*60)
+    app.run_polling()
+
+if __name__ == "__main__":
+    print("\n" + "="*60)
+    print("CHROME BROWSER AUTOMATION BOT")
+    print("="*60)
+    
+    # Run the bot
+    run_bot()

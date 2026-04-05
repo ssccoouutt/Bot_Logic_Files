@@ -1,0 +1,239 @@
+def task5_extract_direct_link(drive_url, chat_id):
+    """Extract direct download link from Google Drive - Professional Version"""
+    import os, re, shutil, time, json, urllib.parse, subprocess, sys, logging
+    from __main__ import send_telegram_message, logger
+    
+    def log_progress(text, send_to_telegram=False):
+        logger.info(f"[EXTRACT] {text}")
+        if send_to_telegram:
+            send_telegram_message(chat_id, f"<b>{text}</b>")
+    
+    def setup_chrome_environment():
+        """Ensures Google Chrome and ChromeDriver are installed and matching"""
+        log_progress("🔧 Setting up Chrome environment...", False)
+        
+        # Check if chrome is installed
+        if not shutil.which("google-chrome"):
+            log_progress("🌐 Installing Google Chrome...", True)
+            os.system("apt-get update -qq")
+            os.system("apt-get install -y wget unzip xvfb libxi6 libgconf-2-4 libvulkan1 mesa-vulkan-drivers > /dev/null 2>&1")
+            os.system("wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb")
+            os.system("dpkg -i google-chrome-stable_current_amd64.deb > /dev/null 2>&1 || apt-get -fy install > /dev/null 2>&1")
+        
+        # Get Chrome version to match ChromeDriver
+        try:
+            version_output = os.popen("google-chrome --version").read()
+            chrome_version = re.search(r'(\d+)\.', version_output).group(1)
+        except:
+            chrome_version = "114"  # Fallback
+
+        if not shutil.which("chromedriver"):
+            log_progress(f"🏎️ Downloading ChromeDriver for Chrome v{chrome_version}...", True)
+            try:
+                # Use Chrome for Testing JSON API to find matching driver
+                os.system("wget -qO- https://googlechromelabs.github.io/chrome-for-testing/known-good-versions-with-downloads.json > versions.json")
+                with open('versions.json') as f:
+                    data = json.load(f)
+                
+                driver_url = None
+                for v in data['versions']:
+                    if v['version'].startswith(chrome_version + '.'):
+                        for d in v['downloads']['chromedriver']:
+                            if d['platform'] == 'linux64':
+                                driver_url = d['url']
+                                break
+                        if driver_url: break
+                
+                if driver_url:
+                    os.system(f"wget -q -O chromedriver.zip '{driver_url}'")
+                    os.system("unzip -q -o chromedriver.zip")
+                    os.system("mv chromedriver-linux64/chromedriver /usr/bin/chromedriver")
+                    os.system("chmod +x /usr/bin/chromedriver")
+                else:
+                    log_progress("⚠️ Could not find matching ChromeDriver", False)
+            except Exception as e:
+                log_progress(f"⚠️ ChromeDriver install error: {e}", False)
+    
+    def setup_browser():
+        """Setup Selenium browser with performance logging enabled"""
+        try:
+            from selenium import webdriver
+            from selenium.webdriver.chrome.options import Options
+            from selenium.webdriver.chrome.service import Service
+            from selenium.webdriver.common.by import By
+        except ImportError:
+            log_progress("📦 Installing Selenium...", True)
+            os.system("pip install -q selenium==4.33.0")
+            from selenium import webdriver
+            from selenium.webdriver.chrome.options import Options
+            from selenium.webdriver.chrome.service import Service
+            from selenium.webdriver.common.by import By
+        
+        chrome_options = Options()
+        chrome_options.add_argument('--headless=new')
+        chrome_options.add_argument('--no-sandbox')
+        chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument('--disable-gpu')
+        chrome_options.add_argument('--window-size=1920,1080')
+        chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36")
+        
+        # Enable performance logging to capture network redirects
+        chrome_options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
+        
+        driver_path = shutil.which('chromedriver')
+        if driver_path:
+            service = Service(driver_path)
+            return webdriver.Chrome(service=service, options=chrome_options)
+        return webdriver.Chrome(options=chrome_options)
+    
+    def extract_drive_id(link):
+        """Extract Google Drive file ID from various link formats"""
+        patterns = [
+            r'/file/d/([a-zA-Z0-9_-]+)',
+            r'/d/([a-zA-Z0-9_-]+)',
+            r'id=([a-zA-Z0-9_-]+)',
+            r'([a-zA-Z0-9_-]{33})',
+            r'([a-zA-Z0-9_-]{19})'
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, link)
+            if match: 
+                fid = match.group(1)
+                log_progress(f"Extracted File ID: {fid}", False)
+                return fid
+        return None
+    
+    def get_final_direct_link(file_id):
+        """Capture the final drive.usercontent.google.com link"""
+        log_progress(f"🚀 Processing File ID: {file_id}", True)
+        driver = setup_browser()
+        
+        try:
+            # Use the direct export URL which triggers the redirect chain
+            url = f"https://drive.google.com/uc?export=download&id={file_id}"
+            log_progress(f"🌐 Navigating to: {url}", True)
+            driver.get(url)
+            
+            log_progress("🔍 Monitoring network traffic for final link...", True)
+            found_url = None
+            
+            # Monitor for up to 25 seconds
+            for attempt in range(25):
+                logs = driver.get_log('performance')
+                for entry in logs:
+                    log_data = json.loads(entry['message'])
+                    params = log_data.get('message', {}).get('params', {})
+                    
+                    # Check both request and response URLs
+                    request_url = params.get('request', {}).get('url')
+                    if request_url and 'drive.usercontent.google.com' in request_url:
+                        found_url = request_url
+                        log_progress(f"Found request URL: {request_url[:80]}...", False)
+                        break
+                    
+                    response_url = params.get('response', {}).get('url')
+                    if response_url and 'drive.usercontent.google.com' in response_url:
+                        found_url = response_url
+                        log_progress(f"Found response URL: {response_url[:80]}...", False)
+                        break
+                
+                if found_url: 
+                    log_progress(f"✅ Final link captured after {attempt+1} seconds", False)
+                    break
+                
+                # Also check if a "Download anyway" button appeared (for large files)
+                try:
+                    confirm_btn = driver.find_element(By.ID, "uc-download-link")
+                    log_progress("📝 Large file detected. Clicking 'Download anyway'...", True)
+                    confirm_btn.click()
+                except:
+                    pass
+                    
+                time.sleep(1)
+            
+            return found_url
+                    
+        except Exception as e:
+            log_progress(f"⚠️ Browser error: {str(e)}", False)
+        finally:
+            driver.quit()
+        return None
+    
+    try:
+        log_progress("🔗 Starting Google Drive Direct Link Extractor", True)
+        log_progress(f"Input URL: {drive_url[:80]}...", False)
+        
+        setup_chrome_environment()
+        
+        # Extract file ID
+        file_id = extract_drive_id(drive_url)
+        if not file_id:
+            send_telegram_message(chat_id, "<b>❌ Invalid Google Drive link format</b>")
+            return
+        
+        # Get final direct link
+        final_link = get_final_direct_link(file_id)
+        
+        if final_link:
+            # Clean up the link if it has query parameters
+            parsed = urllib.parse.urlparse(final_link)
+            clean_link = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+            
+            result_text = f"""
+<b>✅ SUCCESS! FINAL DIRECT LINK FOUND</b>
+
+📊 <b>Information:</b>
+File ID: <code>{file_id}</code>
+Link Type: Direct Download
+
+🔗 <b>Clean Link:</b>
+<code>{clean_link}</code>
+
+🔗 <b>Full Link:</b>
+<code>{final_link}</code>
+
+💻 <b>Download Commands:</b>
+• <code>wget --no-check-certificate '{clean_link}' -O file_name</code>
+• <code>curl -L '{clean_link}' -o file_name</code>
+• <code>aria2c '{clean_link}'</code>
+
+⚠️ <b>Note:</b> Links may expire. Download immediately.
+            """
+            send_telegram_message(chat_id, result_text)
+            
+            # Also send to log
+            log_progress(f"✅ Final link: {final_link[:100]}...", False)
+            
+        else:
+            error_text = f"""
+<b>❌ Could not extract direct link</b>
+
+Possible reasons:
+1. File is not publicly shared
+2. File requires Google account login
+3. File is too large (>100MB) and requires manual download
+4. File has download restrictions
+
+💡 <b>Solutions:</b>
+• Make sure file is set to "Anyone with the link can view"
+• Try opening in incognito mode first
+• For large files, use the regular Google Drive interface
+"""
+            send_telegram_message(chat_id, error_text)
+            log_progress("❌ Extraction failed - file may not be public", False)
+            
+    except Exception as e:
+        logger.error(f"[EXTRACT] Error: {e}")
+        error_msg = f"""
+<b>❌ Extraction Failed</b>
+
+Error: {str(e)[:200]}
+
+Common issues:
+• Chrome/ChromeDriver installation failed
+• Network timeout
+• Invalid URL format
+
+Please try again with a valid public Google Drive link.
+"""
+        send_telegram_message(chat_id, error_msg)

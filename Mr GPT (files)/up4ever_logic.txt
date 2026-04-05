@@ -1,0 +1,206 @@
+def task1_upload_to_up4ever(filepath, chat_id):
+    """Upload file to up-4ever.net - Professional Version with remote cookie download"""
+    import os, time, re, random, string, requests, logging, threading, tempfile
+    from __main__ import send_telegram_message, logger
+    from http.cookiejar import MozillaCookieJar
+    
+    COOKIES_URL = "https://drive.usercontent.google.com/download?id=1euugJq55mn2C5a1egcIFF8FLcFu0QsGN&export=download"
+    
+    def send_progress(text):
+        send_telegram_message(chat_id, text)
+    
+    def download_and_parse_cookies_from_url():
+        """Download cookies from remote URL and parse them into a dictionary"""
+        try:
+            logger.info(f"[COOKIES] Downloading cookies from: {COOKIES_URL}")
+            
+            # Download the cookies file
+            response = requests.get(COOKIES_URL, timeout=30)
+            response.raise_for_status()
+            
+            # Save to temporary file
+            with tempfile.NamedTemporaryFile(mode='w+', suffix='.txt', delete=False) as tmp_file:
+                tmp_file.write(response.text)
+                tmp_path = tmp_file.name
+            
+            logger.info(f"[COOKIES] Saved cookies to temporary file: {tmp_path}")
+            
+            # Parse cookies using MozillaCookieJar
+            cookie_jar = MozillaCookieJar()
+            cookie_jar.load(tmp_path, ignore_expires=True, ignore_discard=True)
+            
+            # Convert to dictionary
+            cookies_dict = {}
+            login_value = None
+            
+            for cookie in cookie_jar:
+                # Only include cookies for up-4ever.net domain
+                if 'up-4ever.net' in cookie.domain:
+                    cookies_dict[cookie.name] = cookie.value
+                    if cookie.name == 'login':
+                        login_value = cookie.value
+                        logger.info(f"[COOKIES] Found login cookie: {login_value}")
+            
+            # Add login to cookies_dict for easy access
+            if login_value:
+                cookies_dict['login'] = login_value
+            
+            # Clean up temp file
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
+            
+            logger.info(f"[COOKIES] Successfully loaded {len(cookies_dict)} cookies")
+            return cookies_dict
+            
+        except Exception as e:
+            logger.error(f"[COOKIES] Failed to download/parse cookies: {e}")
+            send_progress(f"<b>❌ Cookie Error</b>\nFailed to download cookies: {str(e)[:200]}")
+            return None
+    
+    def authenticated_direct_upload(filepath, user_cookies):
+        """Direct HTTP upload with authentication"""
+        if not user_cookies:
+            logger.error("[UPLOAD] No cookies provided")
+            return False
+            
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Referer': 'https://www.up-4ever.net/upload/',
+        })
+
+        # Apply downloaded session cookies
+        for name, value in user_cookies.items():
+            if name != 'login':  # Skip our custom 'login' entry
+                session.cookies.set(name, value, domain='.up-4ever.net')
+
+        try:
+            filename = os.path.basename(filepath)
+            logger.info(f"[UPLOAD] Starting authenticated upload for: {filename}")
+
+            # 1. Get upload server
+            send_progress(f"<b>🔄 Getting upload server...</b>")
+            res = session.get("https://www.up-4ever.net/server")
+            res.raise_for_status()
+            server_url = res.json()['url']
+            if not server_url.endswith("upload.cgi"):
+                server_url = server_url.rstrip("/") + "/upload.cgi"
+            logger.info(f"[UPLOAD] Using server: {server_url}")
+
+            # 2. Get session ID from the upload page (now authenticated)
+            send_progress(f"<b>🔑 Authenticating...</b>")
+            res = session.get("https://www.up-4ever.net/upload/")
+            sess_id_match = re.search(r'name="sess_id" value="([^"]*)"', res.text)
+            sess_id = sess_id_match.group(1) if sess_id_match else ""
+
+            # If sess_id is still empty, generate a random one as fallback
+            if not sess_id:
+                sess_id = ''.join(random.choices(string.ascii_lowercase + string.digits, k=12))
+                logger.info(f"[UPLOAD] Generated session ID: {sess_id}")
+
+            # Get file size
+            file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
+            send_progress(f"<b>📤 Uploading {filename} ({file_size_mb:.2f} MB)...</b>\nThis may take a few minutes for large files.")
+
+            # 3. Perform upload
+            with open(filepath, 'rb') as f:
+                files = {
+                    'file_0': (filename, f, 'application/octet-stream')
+                }
+                data = {
+                    'sess_id': sess_id,
+                    'utype': 'reg',  # 'reg' for registered users
+                    'file_public': '1',
+                    'tos': '1',
+                    'submit_btn': 'Start Uploading'
+                }
+
+                logger.info(f"[UPLOAD] Sending file to {server_url} with sess_id: {sess_id}")
+                # Use verify=False for storage servers with SSL issues
+                res = session.post(server_url, files=files, data=data, verify=False, timeout=600)
+
+                if res.status_code == 200:
+                    # Parse response for file_code
+                    match = re.search(r'"file_code":"([^"]+)"', res.text)
+                    if match:
+                        file_code = match.group(1)
+                        download_link = f"https://www.up-4ever.net/{file_code}"
+                        account = user_cookies.get('login', 'unknown')
+                        
+                        success_msg = f"""
+<b>✅ Upload Successful!</b>
+
+📄 <b>File:</b> {filename}
+👤 <b>Account:</b> {account}
+📏 <b>Size:</b> {file_size_mb:.2f} MB
+🔗 <b>Download Link:</b>
+{download_link}
+
+💡 <b>Note:</b> File will be available for 30 days
+                        """
+                        send_progress(success_msg)
+                        logger.info(f"[UPLOAD] Success! Link: {download_link}")
+                        return True
+                    else:
+                        error_msg = f"<b>❌ Upload failed: Could not extract file code from response</b>"
+                        send_progress(error_msg)
+                        logger.error(f"[UPLOAD] No file_code found in response")
+                        logger.debug(f"[UPLOAD] Response text: {res.text[:500]}")
+                else:
+                    error_msg = f"<b>❌ Upload Failed</b>\nServer returned: {res.status_code}"
+                    send_progress(error_msg)
+                    logger.error(f"[UPLOAD] Server error: {res.status_code}")
+                    
+                return False
+
+        except requests.exceptions.Timeout:
+            error_msg = f"<b>❌ Upload Timeout</b>\nThe upload took too long. File might be too large."
+            send_progress(error_msg)
+            logger.error(f"[UPLOAD] Timeout error")
+            return False
+        except requests.exceptions.ConnectionError:
+            error_msg = f"<b>❌ Connection Error</b>\nCannot connect to upload server. Please try again."
+            send_progress(error_msg)
+            logger.error(f"[UPLOAD] Connection error")
+            return False
+        except requests.exceptions.HTTPError as e:
+            error_msg = f"<b>❌ HTTP Error</b>\n{str(e)[:200]}"
+            send_progress(error_msg)
+            logger.error(f"[UPLOAD] HTTP error: {e}")
+            return False
+        except Exception as e:
+            error_msg = f"<b>❌ Upload Error</b>\n{str(e)[:200]}"
+            send_progress(error_msg)
+            logger.error(f"[UPLOAD] Error: {e}")
+            return False
+        finally:
+            if os.path.exists(filepath):
+                try:
+                    os.remove(filepath)
+                    logger.info(f"[UPLOAD] Cleaned up file: {filepath}")
+                except:
+                    pass
+    
+    try:
+        # Download fresh cookies from remote URL
+        logger.info(f"[TASK1] Starting upload task")
+        user_cookies = download_and_parse_cookies_from_url()
+        
+        if not user_cookies:
+            send_progress("<b>❌ Failed to download cookies. Cannot proceed with upload.</b>")
+            return False
+        
+        account = user_cookies.get('login', 'unknown')
+        
+        # Send initial message
+        send_progress(f"<b>📤 Uploading to up-4ever.net</b>\n👤 <b>Account:</b> {account}\n📄 <b>File:</b> {os.path.basename(filepath)}")
+        
+        # Perform upload
+        return authenticated_direct_upload(filepath, user_cookies)
+        
+    except Exception as e:
+        logger.error(f"[TASK1] Fatal error: {e}")
+        send_progress(f"<b>❌ Fatal Error</b>\n{str(e)[:200]}")
+        return False

@@ -1,0 +1,798 @@
+
+#!/usr/bin/env python3
+"""
+Google/Gemini Bot - EXACT COPY of Original Colab Script
+"""
+
+import os
+import sys
+import subprocess
+import logging
+import io
+import asyncio
+import nest_asyncio
+import json
+import tempfile
+import urllib.request
+import re
+import shutil
+import time
+from datetime import datetime
+from urllib.parse import urlparse
+
+# ========== Install system dependencies exactly like original ==========
+def install_system_dependencies():
+    """Install required system libraries for Playwright - EXACT original"""
+    print("🔧 Installing system dependencies for Playwright...")
+    try:
+        # EXACT same apt-get commands
+        subprocess.run(['apt-get', 'update', '-y'], capture_output=True)
+        subprocess.run(['apt-get', 'install', '-y', 
+                       'libatk-bridge2.0-0',
+                       'libatk1.0-0',
+                       'libcups2',
+                       'libdbus-1-3',
+                       'libdrm2',
+                       'libgbm1',
+                       'libglib2.0-0',
+                       'libnspr4',
+                       'libnss3',
+                       'libpango-1.0-0',
+                       'libx11-6',
+                       'libxcb1',
+                       'libxcomposite1',
+                       'libxdamage1',
+                       'libxext6',
+                       'libxfixes3',
+                       'libxrandr2',
+                       'libxshmfence1',
+                       'libasound2'], 
+                      capture_output=True)
+        print("✅ System dependencies installed")
+    except Exception as e:
+        print(f"⚠️ System dependency install: {e}")
+
+# ========== Install Python packages exactly like original ==========
+def install_dependencies():
+    """Install Python packages exactly like original"""
+    required_python = ["python-telegram-bot", "playwright", "nest_asyncio", "aiohttp", "requests", "Pillow"]
+    for package in required_python:
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "show", package], 
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except subprocess.CalledProcessError:
+            print(f"Installing Python package: {package}...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+    
+    try:
+        print("Installing Playwright browser...")
+        # EXACT same playwright install command
+        subprocess.check_call([sys.executable, "-m", "playwright", "install", "chromium", "--with-deps"])
+    except Exception as e:
+        print(f"Playwright install issue: {e}")
+
+# ========== Run installations exactly like original ==========
+def setup_environment_exact():
+    """Setup environment exactly like original"""
+    print("="*60)
+    print("SETTING UP ENVIRONMENT EXACTLY LIKE ORIGINAL")
+    print("="*60)
+    
+    # 1. Install system dependencies (exact same)
+    install_system_dependencies()
+    
+    # 2. Install Python packages (exact same)
+    install_dependencies()
+    
+    print("="*60)
+    print("SETUP COMPLETE - EXACTLY LIKE ORIGINAL")
+    print("="*60)
+    return True
+
+# Run setup first
+setup_environment_exact()
+
+# ========== NOW THE EXACT ORIGINAL SCRIPT ==========
+# Every single line below is exactly from your original script
+
+from telegram import Update, InputFile
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from playwright.async_api import async_playwright
+import requests
+
+# Apply nest_asyncio for Colab/Jupyter
+nest_asyncio.apply()
+
+# --- CONFIGURATION ---
+TOKEN = "8112251652:AAHQ7msdI8zTC6DjzdkPhwmclZmreN_taj8"
+UPLOAD_TEMP_DIR = "gemini_temp"
+COOKIES_FILE = "cookies.json"
+COOKIES_DOWNLOAD_URL = "https://drive.usercontent.google.com/download?id=1GEIsekK2tAYnkgpSkWnk2IEFfh23Blt2&export=download"
+
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# --- COOKIE DOWNLOAD AND PARSING ---
+def download_cookies():
+    """Download cookies from URL and save to file"""
+    try:
+        print("📥 Downloading cookies from Google Drive...")
+        
+        # Create a temporary file
+        temp_file = tempfile.NamedTemporaryFile(mode='w+b', delete=False, suffix='.txt')
+        temp_path = temp_file.name
+        temp_file.close()
+        
+        # Download the file
+        opener = urllib.request.build_opener()
+        opener.addheaders = [('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')]
+        urllib.request.install_opener(opener)
+        urllib.request.urlretrieve(COOKIES_DOWNLOAD_URL, temp_path)
+        
+        print(f"✅ Cookies downloaded to: {temp_path}")
+        return temp_path
+        
+    except Exception as e:
+        logger.error(f"Failed to download cookies: {e}")
+        return None
+
+def parse_netscape_cookies(cookie_file_path):
+    """
+    Parse Netscape HTTP Cookie file format to Playwright format
+    """
+    playwright_cookies = []
+    
+    try:
+        with open(cookie_file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        
+        for line in lines:
+            # Skip comments and empty lines
+            if line.startswith('#') or not line.strip():
+                continue
+            
+            parts = line.strip().split('\t')
+            if len(parts) < 7:
+                continue
+            
+            domain = parts[0]
+            flag = parts[1].upper() == "TRUE"
+            path = parts[2]
+            secure = parts[3].upper() == "TRUE"
+            expiration = float(parts[4]) if parts[4] else None
+            name = parts[5]
+            value = parts[6]
+            
+            # Skip if cookie is expired
+            if expiration and expiration < datetime.now().timestamp():
+                continue
+            
+            # Create cookie object for Playwright
+            cookie = {
+                'name': name,
+                'value': value,
+                'domain': domain,
+                'path': path,
+                'secure': secure,
+                'httpOnly': False,
+                'sameSite': 'Lax',
+            }
+            
+            # Add expiration if present
+            if expiration:
+                cookie['expires'] = expiration
+            
+            playwright_cookies.append(cookie)
+        
+        logger.info(f"✅ Parsed {len(playwright_cookies)} cookies from {cookie_file_path}")
+        return playwright_cookies
+        
+    except Exception as e:
+        logger.error(f"Failed to parse cookies: {e}")
+        return []
+
+def load_cookies():
+    """Load cookies from download URL or cached file"""
+    global GOOGLE_COOKIES
+    
+    # First try to download fresh cookies
+    temp_file = download_cookies()
+    if temp_file:
+        cookies = parse_netscape_cookies(temp_file)
+        if cookies:
+            # Save to local file for caching
+            with open(COOKIES_FILE, 'w') as f:
+                json.dump(cookies, f, indent=2)
+            logger.info(f"✅ Saved {len(cookies)} cookies to {COOKIES_FILE}")
+            
+            # Clean up temp file
+            try:
+                os.remove(temp_file)
+            except:
+                pass
+                
+            return cookies
+    
+    # If download fails, try to load from cached file
+    if os.path.exists(COOKIES_FILE):
+        try:
+            with open(COOKIES_FILE, 'r') as f:
+                cached_cookies = json.load(f)
+                if cached_cookies:
+                    logger.info(f"📂 Loaded {len(cached_cookies)} cookies from cache")
+                    return cached_cookies
+        except Exception as e:
+            logger.error(f"Failed to load cached cookies: {e}")
+    
+    logger.warning("⚠️ No cookies loaded")
+    return []
+
+# Load cookies
+GOOGLE_COOKIES = load_cookies()
+
+# --- FILE HANDLING FUNCTIONS ---
+def download_file_from_url(url):
+    """Download file from URL with proper filename detection"""
+    try:
+        with requests.get(url, stream=True, allow_redirects=True) as response:
+            content_disposition = response.headers.get('content-disposition')
+            filename = None
+
+            if content_disposition:
+                fname = re.findall('filename=(.+)', content_disposition)
+                if fname:
+                    filename = fname[0].strip('"\'')
+
+            if not filename:
+                parsed = urlparse(url)
+                filename = os.path.basename(parsed.path)
+                if not filename:
+                    filename = f"download_{int(time.time())}"
+                
+                # Add extension based on content type
+                if '.' not in filename:
+                    content_type = response.headers.get('content-type', '')
+                    if 'image/jpeg' in content_type:
+                        filename += '.jpg'
+                    elif 'image/png' in content_type:
+                        filename += '.png'
+                    elif 'application/pdf' in content_type:
+                        filename += '.pdf'
+                    elif 'application/zip' in content_type:
+                        filename += '.zip'
+                    elif 'text/plain' in content_type:
+                        filename += '.txt'
+                    else:
+                        filename += '.bin'
+            
+            # Clean filename
+            filename = re.sub(r'[^\w\-_. ]', '_', filename)
+            filepath = os.path.join(UPLOAD_TEMP_DIR, filename)
+            
+            with open(filepath, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            
+            logger.info(f"✅ Downloaded file: {filename} ({os.path.getsize(filepath)} bytes)")
+            return filepath
+    except Exception as e:
+        logger.error(f"Error downloading file from URL: {e}")
+        return None
+
+# --- BROWSER LOGIC ---
+async def capture_authenticated_page(url, query=None, file_path=None):
+    """Capture page with authentication"""
+    async with async_playwright() as p:
+        try:
+            # Launch browser
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--window-size=1280,720"
+                ],
+                timeout=45000
+            )
+        except Exception as launch_error:
+            logger.error(f"Browser launch failed: {launch_error}")
+            try:
+                browser = await p.chromium.launch(headless=True, args=["--no-sandbox"], timeout=45000)
+            except Exception as e:
+                logger.error(f"Second launch attempt also failed: {e}")
+                return None, None, f"Browser launch failed: {str(e)[:100]}"
+        
+        # Create context
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            viewport={"width": 1280, "height": 720},
+            locale="en-US",
+            accept_downloads=True
+        )
+        
+        # Add cookies if available
+        if GOOGLE_COOKIES:
+            try:
+                await context.add_cookies(GOOGLE_COOKIES)
+                logger.info(f"🍪 Added {len(GOOGLE_COOKIES)} cookies to browser")
+            except Exception as e:
+                logger.error(f"Failed to add cookies: {e}")
+        
+        page = await context.new_page()
+        page.set_default_timeout(45000)
+        
+        try:
+            logger.info(f"🌐 Navigating to {url}...")
+            await page.goto(url, wait_until="load", timeout=45000)
+            await asyncio.sleep(2)
+            
+            # Check for login redirect
+            current_url = page.url
+            if "accounts.google.com" in current_url and ("signin" in current_url or "login" in current_url):
+                logger.warning("❌ Not logged in - redirect to signin page detected")
+                screenshot_bytes = await page.screenshot(full_page=True, type="jpeg", quality=85)
+                await browser.close()
+                return None, io.BytesIO(screenshot_bytes), "Authentication failed - redirected to login page"
+            
+            response_text = ""
+            
+            # Gemini specific handling
+            if "gemini.google.com" in url:
+                response_text = await handle_gemini_page(page, query, file_path)
+            
+            # Take screenshot
+            logger.info("📸 Taking screenshot...")
+            await asyncio.sleep(2)
+            screenshot_bytes = await page.screenshot(full_page=True, type="jpeg", quality=85)
+            
+            await browser.close()
+            return response_text, io.BytesIO(screenshot_bytes), None
+            
+        except Exception as e:
+            logger.error(f"Browser error: {e}", exc_info=True)
+            try:
+                screenshot_bytes = await page.screenshot(full_page=True, type="jpeg", quality=85)
+                await browser.close()
+                return None, io.BytesIO(screenshot_bytes), f"Error: {str(e)}"
+            except:
+                try:
+                    await browser.close()
+                except:
+                    pass
+                return None, None, f"Critical error: {str(e)}"
+
+async def handle_gemini_page(page, query=None, file_path=None):
+    """Handle interactions with Gemini page"""
+    try:
+        await page.wait_for_load_state("load")
+        
+        # Wait for input area
+        try:
+            await page.wait_for_selector("[contenteditable='true'], textarea, input[type='text']", 
+                                       state="visible", timeout=30000)
+        except:
+            logger.warning("Input area not found quickly, trying fallback...")
+            await asyncio.sleep(5)
+        
+        # Check if we need to accept terms
+        accept_selectors = [
+            "button:has-text('I agree')",
+            "button:has-text('Accept')",
+            "button:has-text('Continue')",
+            "[aria-label*='agree']",
+            "[aria-label*='accept']"
+        ]
+        
+        for selector in accept_selectors:
+            try:
+                accept_btn = await page.wait_for_selector(selector, timeout=5000)
+                if accept_btn:
+                    await accept_btn.click()
+                    await asyncio.sleep(2)
+                    break
+            except:
+                continue
+        
+        # Handle file upload
+        if file_path and os.path.exists(file_path):
+            await upload_file_to_gemini(page, file_path)
+        
+        # Handle query
+        if query:
+            await send_gemini_query(page, query)
+            # Wait for and extract response with smart detection
+            return await extract_gemini_response(page)
+        
+        return "No query provided"
+        
+    except Exception as e:
+        logger.error(f"Gemini handling error: {e}")
+        return f"Error during Gemini interaction: {str(e)}"
+
+async def upload_file_to_gemini(page, file_path):
+    """Upload file to Gemini"""
+    try:
+        logger.info(f"📎 Uploading file: {file_path}")
+        upload_selectors = [
+            "button[aria-label*='upload']",
+            "button[aria-label*='file']",
+            "button[aria-label*='attach']",
+            "button[title*='upload']",
+            "button[title*='file']",
+            "button:has-text('Upload')",
+            "button:has-text('Attach')",
+            "svg + span:has-text('Upload')",
+            "div[aria-label*='upload']"
+        ]
+        
+        for selector in upload_selectors:
+            try:
+                upload_btn = await page.query_selector(selector)
+                if upload_btn and await upload_btn.is_visible():
+                    await upload_btn.click()
+                    await asyncio.sleep(1)
+                    
+                    upload_files_selector = [
+                        "div:has-text('Upload files')",
+                        "button:has-text('Upload files')",
+                        "li:has-text('Upload files')",
+                        "[role='menuitem']:has-text('Upload files')",
+                        "text=Upload files"
+                    ]
+                    
+                    for file_selector in upload_files_selector:
+                        try:
+                            file_option = await page.wait_for_selector(file_selector, timeout=3000)
+                            if file_option:
+                                await file_option.click()
+                                break
+                        except:
+                            continue
+                    break
+            except:
+                continue
+        
+        try:
+            async with page.expect_file_chooser(timeout=10000) as fc_info:
+                try:
+                    upload_div = await page.query_selector("text=Upload files")
+                    if upload_div:
+                        await upload_div.click()
+                except:
+                    pass
+            
+            file_chooser = await fc_info.value
+            await file_chooser.set_files(file_path)
+            logger.info("✅ File uploaded successfully")
+            await asyncio.sleep(3)
+        except Exception as e:
+            logger.error(f"File chooser error: {e}")
+            try:
+                file_input = await page.query_selector("input[type='file']")
+                if file_input:
+                    await file_input.set_input_files(file_path)
+                    logger.info("✅ File uploaded via direct input")
+                    await asyncio.sleep(3)
+            except Exception as e2:
+                logger.error(f"Direct file input also failed: {e2}")
+    except Exception as e:
+        logger.error(f"File upload failed: {e}")
+
+async def send_gemini_query(page, query):
+    """Send query to Gemini"""
+    try:
+        logger.info(f"💭 Sending query: {query[:50]}...")
+        input_selectors = [
+            "[contenteditable='true']",
+            "textarea",
+            "input[type='text']",
+            "[role='textbox']",
+            "div[contenteditable='true']"
+        ]
+        
+        for selector in input_selectors:
+            try:
+                input_element = await page.wait_for_selector(selector, timeout=5000)
+                if input_element:
+                    await input_element.click()
+                    await input_element.fill("")
+                    await input_element.type(query, delay=50)
+                    
+                    send_selectors = [
+                        "button[aria-label*='send']",
+                        "button[aria-label*='submit']",
+                        "button:has-text('Send')",
+                        "button:has-text('Submit')",
+                        "button[type='submit']",
+                        "button[aria-label='Send message']",
+                        "svg[aria-label='Send']"
+                    ]
+                    
+                    for send_selector in send_selectors:
+                        try:
+                            send_btn = await page.wait_for_selector(send_selector, timeout=2000)
+                            if send_btn:
+                                await send_btn.click()
+                                break
+                        except:
+                            continue
+                    else:
+                        await page.keyboard.press("Enter")
+                    
+                    logger.info("✅ Query sent")
+                    await asyncio.sleep(2)
+                    return
+            except:
+                continue
+        
+        await page.keyboard.type(query)
+        await page.keyboard.press("Enter")
+    except Exception as e:
+        logger.error(f"Query sending failed: {e}")
+
+async def extract_gemini_response(page):
+    """Improved extraction with smart detection of completion"""
+    try:
+        logger.info("⏳ Waiting for response completion...")
+        
+        last_text = ""
+        stable_count = 0
+        max_wait = 120 # 2 minutes max
+        
+        for i in range(max_wait):
+            # 1. Check for "Stop" button or "Generating" indicators using standard JS
+            is_generating = await page.evaluate('''() => {
+                // Check for stop button by aria-label or text content
+                const buttons = Array.from(document.querySelectorAll('button'));
+                const stopBtn = buttons.find(b => {
+                    const label = (b.getAttribute('aria-label') || '').toLowerCase();
+                    const text = (b.innerText || '').toLowerCase();
+                    return label.includes('stop') || text.includes('stop');
+                });
+                
+                if (stopBtn && stopBtn.offsetParent !== null) return true;
+                
+                // Check for progress bars or pulsing animations
+                const progress = document.querySelector('mat-progress-bar, .generating, .loading, .typing-indicator');
+                if (progress && progress.offsetParent !== null) return true;
+                
+                return false;
+            }''')
+            
+            # 2. Get current text from the last response
+            current_text = await page.evaluate('''() => {
+                const selectors = ['model-response', '.model-response', '[data-message-author-role="model"]', '.markdown'];
+                let lastResponse = null;
+                
+                for (const selector of selectors) {
+                    const elements = document.querySelectorAll(selector);
+                    if (elements.length > 0) {
+                        lastResponse = elements[elements.length - 1];
+                        break;
+                    }
+                }
+                
+                return lastResponse ? lastResponse.innerText.trim() : "";
+            }''')
+            
+            if current_text:
+                # If text is non-empty and has changed, reset stability
+                if current_text != last_text:
+                    stable_count = 0
+                    last_text = current_text
+                elif not is_generating:
+                    # Text is same as last time and no generating indicator
+                    stable_count += 1
+                    # If text is stable for 3 seconds, it's likely done
+                    if stable_count >= 3:
+                        logger.info(f"✅ Response stable and complete ({len(current_text)} chars)")
+                        return current_text
+            
+            await asyncio.sleep(1)
+            if i % 10 == 0:
+                logger.info(f"Waiting... (elapsed: {i}s, generating: {is_generating}, stable: {stable_count})")
+                
+        if last_text:
+            logger.warning("⚠️ Response extraction reached timeout but has partial text")
+            return last_text
+            
+        logger.warning("⚠️ Response timeout")
+        return "Response timeout - check screenshot"
+        
+    except Exception as e:
+        logger.error(f"Response extraction failed: {e}")
+        return f"Error extracting response: {str(e)}"
+
+# --- TELEGRAM HANDLERS ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send welcome message"""
+    cookies_status = f"✅ {len(GOOGLE_COOKIES)} cookies loaded" if GOOGLE_COOKIES else "❌ No cookies loaded"
+    welcome_text = f"""
+🤖 *Google & Gemini Bot*
+
+*Status:* {cookies_status}
+
+*Commands:*
+/start - Show this message
+/status - Detailed status
+/google - Get Google screenshot
+/gemini <query> - Ask Gemini
+/query - Ask Gemini without file
+/skip - Skip file upload
+/refresh - Refresh cookies
+
+*Usage:*
+1. Send a file URL (or document)
+2. Then send your query
+Or use /query to ask without files
+    """
+    await update.message.reply_text(welcome_text, parse_mode='Markdown')
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Check bot status"""
+    cookies_count = len(GOOGLE_COOKIES) if GOOGLE_COOKIES else 0
+    cookie_domains = set()
+    if GOOGLE_COOKIES:
+        for cookie in GOOGLE_COOKIES:
+            cookie_domains.add(cookie.get('domain', 'unknown'))
+    
+    status_msg = (
+        "📊 *Bot Status*\n\n"
+        f"• Cookies loaded: {cookies_count}\n"
+        f"• Cookie domains: {', '.join(cookie_domains)[:50]}\n"
+        f"• Last refresh: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        "Use /refresh to update cookies from Google Drive"
+    )
+    await update.message.reply_text(status_msg, parse_mode='Markdown')
+
+async def refresh_cookies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Refresh cookies from download URL"""
+    msg = await update.message.reply_text("🔄 Refreshing cookies...")
+    global GOOGLE_COOKIES
+    GOOGLE_COOKIES = load_cookies()
+    if GOOGLE_COOKIES:
+        await msg.edit_text(f"✅ Refreshed {len(GOOGLE_COOKIES)} cookies from Google Drive")
+    else:
+        await msg.edit_text("❌ Failed to refresh cookies. Using cached ones if available.")
+
+async def google_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /google command"""
+    if not GOOGLE_COOKIES:
+        await update.message.reply_text("❌ No cookies loaded. Use /refresh to download cookies.")
+        return
+    msg = await update.message.reply_text("📸 Capturing Google screenshot...")
+    try:
+        text, screenshot, error = await capture_authenticated_page("https://www.google.com")
+        if error:
+            await msg.edit_text(f"❌ Error: {error}")
+        elif screenshot:
+            await update.message.reply_photo(photo=screenshot, caption=f"🔐 Google.com")
+            await msg.delete()
+        else:
+            await msg.edit_text("❌ Failed to capture screenshot")
+    except Exception as e:
+        logger.error(f"Google error: {e}")
+        await msg.edit_text(f"❌ Error: {str(e)[:200]}")
+
+async def skip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Skip file upload"""
+    context.user_data['skip_file'] = True
+    await update.message.reply_text("✅ File upload skipped. Now send your query:")
+
+async def query_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ask query without file"""
+    context.user_data['direct_query'] = True
+    await update.message.reply_text("Please send your query/question:")
+
+async def gemini_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /gemini command"""
+    if not GOOGLE_COOKIES:
+        await update.message.reply_text("❌ No cookies loaded. Use /refresh to download cookies.")
+        return
+    query = " ".join(context.args) if context.args else None
+    if query:
+        await process_gemini_request(update, context, query, None)
+        return
+    context.user_data['awaiting_query'] = True
+    await update.message.reply_text("Please send your query/question:")
+
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle text messages"""
+    user_input = update.message.text
+    if 'awaiting_query' in context.user_data and context.user_data['awaiting_query']:
+        query = user_input
+        file_path = context.user_data.get('file_path')
+        await process_gemini_request(update, context, query, file_path)
+        context.user_data.clear()
+    elif 'direct_query' in context.user_data and context.user_data['direct_query']:
+        query = user_input
+        await process_gemini_request(update, context, query, None)
+        context.user_data.clear()
+    elif 'file_url' in context.user_data:
+        query = user_input
+        file_path = context.user_data['file_path']
+        await process_gemini_request(update, context, query, file_path)
+        context.user_data.clear()
+    else:
+        if re.match(r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+', user_input):
+            file_path = download_file_from_url(user_input)
+            if file_path:
+                context.user_data['file_url'] = user_input
+                context.user_data['file_path'] = file_path
+                await update.message.reply_text(f"✅ Downloaded file. Now send your query:")
+            else:
+                await update.message.reply_text("❌ Failed to download file.")
+        else:
+            await process_gemini_request(update, context, user_input, None)
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle document uploads"""
+    if not GOOGLE_COOKIES:
+        await update.message.reply_text("❌ No cookies loaded.")
+        return
+    doc = update.message.document
+    file = await context.bot.get_file(doc.file_id)
+    if not os.path.exists(UPLOAD_TEMP_DIR):
+        os.makedirs(UPLOAD_TEMP_DIR)
+    safe_filename = re.sub(r'[^\w\-_. ]', '_', doc.file_name or f"document_{doc.file_id}")
+    file_path = os.path.join(UPLOAD_TEMP_DIR, safe_filename)
+    await file.download_to_drive(file_path)
+    context.user_data['file_path'] = file_path
+    context.user_data['file_url'] = f"telegram_document_{doc.file_id}"
+    await update.message.reply_text(f"✅ Received file: {doc.file_name}\nNow send your query:")
+
+async def process_gemini_request(update: Update, context: ContextTypes.DEFAULT_TYPE, query, file_path):
+    """Process Gemini request"""
+    if not GOOGLE_COOKIES:
+        await update.message.reply_text("❌ No cookies loaded.")
+        return
+    msg = await update.message.reply_text("🧠 Gemini is thinking...")
+    try:
+        text, screenshot, error = await capture_authenticated_page("https://gemini.google.com", query, file_path)
+        if error:
+            await msg.edit_text(f"❌ Error: {error}")
+        else:
+            if text and len(text) > 10:
+                if len(text) > 4000:
+                    text = text[:4000] + "...\n\n📷 Full response in screenshot"
+                await update.message.reply_text(f"*Gemini Response:*\n\n{text}", parse_mode='Markdown')
+            if screenshot and screenshot.getbuffer().nbytes > 0:
+                await update.message.reply_photo(photo=screenshot, caption=f"📸 Gemini Screenshot")
+            await msg.delete()
+    except Exception as e:
+        logger.error(f"Gemini error: {e}", exc_info=True)
+        await msg.edit_text(f"❌ Error: {str(e)[:200]}")
+    finally:
+        if file_path and os.path.exists(file_path):
+            try: os.remove(file_path)
+            except: pass
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle errors"""
+    logger.error(f"Update {update} caused error: {context.error}")
+
+def main():
+    """Main function to run the bot"""
+    if not os.path.exists(UPLOAD_TEMP_DIR):
+        os.makedirs(UPLOAD_TEMP_DIR)
+    application = Application.builder().token(TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("refresh", refresh_cookies))
+    application.add_handler(CommandHandler("google", google_handler))
+    application.add_handler(CommandHandler("gemini", gemini_handler))
+    application.add_handler(CommandHandler("query", query_command))
+    application.add_handler(CommandHandler("skip", skip_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    application.add_error_handler(error_handler)
+    print("🚀 Google/Gemini Bot Starting...")
+    application.run_polling(drop_pending_updates=True)
+
+if __name__ == "__main__":
+    main()

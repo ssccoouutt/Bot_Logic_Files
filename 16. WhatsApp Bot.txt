@@ -1,0 +1,835 @@
+
+#!/usr/bin/env python3
+"""
+ULTRA-FAST WhatsApp Auto-Reply with Drive Links - EXACT COPY of Original Colab Script
+"""
+
+import os
+import sys
+import subprocess
+import time
+import logging
+import tempfile
+import zipfile
+import shutil
+import io
+import asyncio
+import random
+import re
+import hashlib
+import json
+import warnings
+from datetime import datetime, timedelta
+from threading import Thread, Lock
+from collections import deque
+
+# ======================== SYSTEM DEPENDENCY INSTALLATION ========================
+def install_system_dependencies():
+    """Install required system packages EXACTLY like original Colab commands"""
+    print("🔧 Installing system dependencies...")
+    
+    # EXACT same commands as original
+    subprocess.run("apt-get update", shell=True, check=False)
+    subprocess.run("apt-get install -y wget unzip xvfb libxi6 libgconf-2-4 libvulkan1 mesa-vulkan-drivers ffmpeg xclip", shell=True, check=False)
+    subprocess.run("wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb", shell=True, check=False)
+    subprocess.run("dpkg -i google-chrome-stable_current_amd64.deb || apt-get -fy install", shell=True, check=False)
+    
+    print("✓ System dependencies installed")
+
+# ======================== PYTHON PACKAGE INSTALLATION ========================
+def install_python_packages():
+    """Install Python packages EXACTLY like original Colab commands"""
+    print("📦 Installing Python packages...")
+    
+    # EXACT same pip install command
+    packages = [
+        "selenium", "webdriver-manager", "pillow", 
+        "python-telegram-bot", "nest_asyncio", "yt-dlp", "requests"
+    ]
+    subprocess.run(f"{sys.executable} -m pip install {' '.join(packages)}", shell=True, check=False)
+    
+    print("✓ Python packages installed")
+
+# Run installations first (EXACTLY like original Colab order)
+print("="*60)
+print("ULTRA-FAST WhatsApp Auto-Reply with Drive Links")
+print("="*60)
+install_system_dependencies()
+install_python_packages()
+
+# ======================== NOW IMPORT ALL LIBRARIES AFTER INSTALLATION ========================
+print("\n📚 Importing libraries...")
+try:
+    import nest_asyncio
+    import requests
+    from telegram import Update, InputFile
+    from telegram.ext import Application, CommandHandler, ContextTypes
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.common.keys import Keys
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
+    from selenium.webdriver.common.action_chains import ActionChains
+    from PIL import Image
+    import urllib3
+    print("✓ All libraries imported successfully")
+except ImportError as e:
+    print(f"⚠️ Import error: {e}")
+    print("🔄 Retrying installation...")
+    install_python_packages()
+    import nest_asyncio
+    import requests
+    from telegram import Update, InputFile
+    from telegram.ext import Application, CommandHandler, ContextTypes
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.common.keys import Keys
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
+    from selenium.webdriver.common.action_chains import ActionChains
+    from PIL import Image
+    import urllib3
+    print("✓ Libraries imported on second attempt")
+
+# Apply nest_asyncio
+nest_asyncio.apply()
+
+# Suppress Selenium and urllib3 warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+logging.getLogger('selenium').setLevel(logging.ERROR)
+logging.getLogger('urllib3').setLevel(logging.ERROR)
+
+# Configuration
+TOKEN = "8259813229:AAFnwq6E9R8a9LxnHLI-epjiQRLyo4uc6xo"
+SESSION_URL = "https://drive.usercontent.google.com/download?id=1SyYW-pdsCGOYgMfQn5RxtgbI7Nh8ncoQ&export=download&confirm=t&uuid=6328188c-7ab5-461a-85d0-9f3ce10bf948"
+SESSION_DIR = "whatsapp_session"
+CHROME_PROFILE_DIR = os.path.join(SESSION_DIR, "chrome_profile")
+
+# Google Drive Direct Link API
+DRIVE_API_URL = "https://quantummechanical-woodrow-iconically.ngrok-free.dev/extract"
+
+# Enable detailed logging for debugging
+logging.basicConfig(
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.DEBUG
+)
+logger = logging.getLogger(__name__)
+
+driver = None
+keep_alive_running = True
+monitor_running = True
+last_activity_time = datetime.now()
+
+# Fast tracking structures
+chat_cache = {}
+chat_cache_lock = Lock()
+reply_cooldown = {}
+drive_cooldown = {}
+cooldown_lock = Lock()
+COOLDOWN_MS = 3000
+DRIVE_COOLDOWN = 60
+
+def debug_print(message, level="INFO"):
+    """Detailed debug output"""
+    timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    print(f"[{timestamp}] {message}")
+
+def extract_drive_url(text):
+    """Extract Google Drive URL from text - FIXED VERSION"""
+    # More comprehensive patterns for Google Drive URLs
+    patterns = [
+        # Standard file links with /d/ format
+        r'(https?://drive\.google\.com/file/d/([a-zA-Z0-9_-]+)/view[^\s]*)',
+        r'(https?://drive\.google\.com/file/d/([a-zA-Z0-9_-]+)[^\s]*)',
+        # Open links
+        r'(https?://drive\.google\.com/open\?id=([a-zA-Z0-9_-]+)[^\s]*)',
+        # UC links
+        r'(https?://drive\.google\.com/uc\?id=([a-zA-Z0-9_-]+)[^\s]*)',
+        # Usercontent links
+        r'(https?://drive\.usercontent\.google\.com/download\?id=([a-zA-Z0-9_-]+)[^\s]*)',
+        # Any drive.google.com URL
+        r'(https?://[^\s]+?drive\.google\.com[^\s]+)'
+    ]
+    
+    debug_print(f"🔍 Attempting to extract URL from: {text[:100]}", "DEBUG")
+    
+    for i, pattern in enumerate(patterns):
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            url = match.group(1)
+            # Clean up the URL (remove trailing punctuation)
+            url = re.sub(r'[.,;:!?)$]$', '', url)
+            
+            # Extract file ID for verification
+            file_id_match = re.search(r'(?:/d/|id=)([a-zA-Z0-9_-]+)', url)
+            if file_id_match:
+                file_id = file_id_match.group(1)
+                debug_print(f"📋 Extracted file ID: {file_id}", "DEBUG")
+            
+            debug_print(f"✅ Extracted URL (pattern {i+1}): {url}", "SUCCESS")
+            return url
+    
+    debug_print(f"❌ No drive URL found in: {text[:100]}", "DEBUG")
+    return None
+
+def is_google_drive_link(text):
+    """Check if text contains a Google Drive link"""
+    # Pattern for Google Drive links
+    patterns = [
+        r'drive\.google\.com/file/d/[a-zA-Z0-9_-]+',
+        r'drive\.google\.com/open\?id=[a-zA-Z0-9_-]+',
+        r'drive\.google\.com/uc\?id=[a-zA-Z0-9_-]+',
+        r'drive\.usercontent\.google\.com/download\?id=[a-zA-Z0-9_-]+',
+        r'drive\.google\.com'
+    ]
+    
+    for pattern in patterns:
+        if re.search(pattern, text, re.IGNORECASE):
+            debug_print(f"✅ Drive link detected with pattern: {pattern}", "DEBUG")
+            return True
+    return False
+
+def get_direct_download_link(drive_url):
+    """Get direct download link from Google Drive URL using API - IMPROVED VERSION"""
+    try:
+        debug_print(f"🔄 Getting direct link for: {drive_url}", "INFO")
+        
+        # Extract file ID if needed (the API might work better with just the ID)
+        file_id_match = re.search(r'(?:/d/|id=)([a-zA-Z0-9_-]+)', drive_url)
+        if file_id_match:
+            file_id = file_id_match.group(1)
+            debug_print(f"📋 Extracted file ID: {file_id}", "DEBUG")
+            
+            # Try with just the ID first (faster)
+            id_url = f"https://drive.google.com/uc?id={file_id}"
+            params = {'url': id_url}
+            debug_print(f"🔄 Using ID-based URL: {id_url}", "DEBUG")
+        else:
+            params = {'url': drive_url}
+            debug_print(f"🔄 Using original URL: {drive_url}", "DEBUG")
+        
+        headers = {'ngrok-skip-browser-warning': 'true'}
+        
+        # API call with timeout (60 seconds as specified)
+        debug_print(f"⏳ Calling API with params: {params}", "DEBUG")
+        response = requests.get(DRIVE_API_URL, params=params, headers=headers, timeout=60)
+        
+        debug_print(f"📡 API response status: {response.status_code}", "DEBUG")
+        
+        if response.status_code == 200:
+            try:
+                data = response.json()
+                debug_print(f"📦 API response data: {data}", "DEBUG")
+                
+                if data.get('success') and 'direct_link' in data:
+                    direct_link = data['direct_link']
+                    debug_print(f"✅ Got direct link: {direct_link}", "SUCCESS")
+                    return direct_link
+                else:
+                    debug_print(f"❌ API returned error: {data.get('error', 'Unknown error')}", "ERROR")
+            except json.JSONDecodeError as e:
+                debug_print(f"❌ Failed to parse API response: {e}", "ERROR")
+                debug_print(f"Response text: {response.text[:200]}", "ERROR")
+        else:
+            debug_print(f"❌ API request failed: {response.status_code}", "ERROR")
+            debug_print(f"Response: {response.text[:200]}", "ERROR")
+            
+    except requests.exceptions.Timeout:
+        debug_print(f"⏱️ API timeout after 60 seconds", "WARNING")
+    except Exception as e:
+        debug_print(f"❌ Error getting direct link: {e}", "ERROR")
+    
+    return None
+
+def test_drive_api():
+    """Test the Drive API with a sample URL"""
+    test_url = "https://drive.google.com/file/d/1SyYW-pdsCGOYgMfQn5RxtgbI7Nh8ncoQ/view"
+    debug_print(f"🔬 Testing Drive API with: {test_url}", "INFO")
+    
+    # Test extraction first
+    extracted = extract_drive_url(test_url)
+    if extracted:
+        debug_print(f"✅ Extraction test passed: {extracted}", "SUCCESS")
+        
+        # Test API call
+        direct = get_direct_download_link(extracted)
+        if direct:
+            debug_print(f"✅ API test passed: {direct}", "SUCCESS")
+            return True
+        else:
+            debug_print(f"❌ API test failed - could not get direct link", "ERROR")
+    else:
+        debug_print(f"❌ Extraction test failed - URL pattern not recognized", "ERROR")
+    
+    return False
+
+def download_and_extract_session():
+    """Download session zip and extract it"""
+    try:
+        debug_print("Loading session...", "INFO")
+        response = requests.get(SESSION_URL, stream=True)
+        response.raise_for_status()
+        
+        zip_path = os.path.join(tempfile.gettempdir(), "session.zip")
+        with open(zip_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+        
+        if os.path.exists(CHROME_PROFILE_DIR):
+            shutil.rmtree(CHROME_PROFILE_DIR)
+        os.makedirs(CHROME_PROFILE_DIR, exist_ok=True)
+        
+        with zipfile.ZipFile(zip_path, 'r') as zipf:
+            for name in zipf.namelist():
+                if name.startswith('chrome_profile/'):
+                    target_path = os.path.join(CHROME_PROFILE_DIR, name.replace('chrome_profile/', '', 1))
+                    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                    if not name.endswith('/'):
+                        with zipf.open(name) as source, open(target_path, 'wb') as target:
+                            shutil.copyfileobj(source, target)
+        
+        os.remove(zip_path)
+        debug_print("Session loaded", "SUCCESS")
+        return True
+        
+    except Exception as e:
+        debug_print(f"Session load failed: {e}", "ERROR")
+        return False
+
+def initialize_driver():
+    """Initialize Chrome driver with optimized settings"""
+    global driver
+    
+    chrome_options = Options()
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("--remote-debugging-port=9222")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_argument("--disable-web-security")
+    chrome_options.add_argument("--disable-features=VizDisplayCompositor")
+    chrome_options.add_argument("--lang=en-US")
+    
+    chrome_options.add_argument("--max-connections-per-server=10")
+    
+    chrome_options.binary_location = "/usr/bin/google-chrome"
+    
+    if os.path.exists(CHROME_PROFILE_DIR):
+        chrome_options.add_argument(f"--user-data-dir={CHROME_PROFILE_DIR}")
+        chrome_options.add_argument("--profile-directory=Default")
+        debug_print("Using existing Chrome profile", "INFO")
+    
+    driver = webdriver.Chrome(options=chrome_options)
+    driver.get("https://web.whatsapp.com")
+    debug_print("Navigated to WhatsApp Web", "INFO")
+    time.sleep(8)
+    
+    # Wait for WhatsApp to load
+    try:
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.XPATH, '//div[@contenteditable="true"]'))
+        )
+        debug_print("WhatsApp ready - input box detected", "SUCCESS")
+        
+        try:
+            chats = driver.find_elements(By.XPATH, '//div[@role="listitem"]')
+            debug_print(f"Found {len(chats)} chats in sidebar", "INFO")
+        except:
+            pass
+            
+    except Exception as e:
+        debug_print(f"WhatsApp load warning: {e}", "WARNING")
+    
+    return driver
+
+def ultra_fast_reply(chat_name, reply_text):
+    """Send reply in under 500ms"""
+    try:
+        start = time.time()
+        debug_print(f"⚡ Attempting reply to '{chat_name}'", "DEBUG")
+        
+        if not chat_name:
+            debug_print(f"❌ Cannot reply: chat_name is None", "ERROR")
+            return False
+        
+        # Try multiple methods to click the chat
+        try:
+            chat_element = driver.find_element(By.XPATH, f'//span[@title="{chat_name}"]')
+            chat_element.click()
+        except:
+            try:
+                driver.execute_script(f"""
+                    var spans = document.evaluate("//span[@title='{chat_name}']", document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+                    if(spans.singleNodeValue) {{
+                        spans.singleNodeValue.click();
+                    }}
+                """)
+            except Exception as e:
+                debug_print(f"Click failed: {e}", "ERROR")
+                return False
+        
+        time.sleep(0.1)
+        
+        # Find input box
+        input_box = driver.find_element(By.XPATH, '//div[@contenteditable="true"][@data-tab="10"]')
+        
+        # Clear and send message - use plain text only
+        input_box.clear()
+        
+        # Send the link as plain text without any markdown formatting
+        input_box.send_keys(reply_text)
+        time.sleep(0.1)
+        input_box.send_keys(Keys.ENTER)
+        
+        elapsed = (time.time() - start) * 1000
+        debug_print(f"✅ Replied to '{chat_name}' in {elapsed:.0f}ms", "SUCCESS")
+        return True
+        
+    except Exception as e:
+        debug_print(f"Reply failed: {e}", "ERROR")
+        return False
+
+def monitor_chats_ultra_fast():
+    """Monitor chats every 100ms for instant response"""
+    global monitor_running
+    
+    debug_print("🚀 Ultra-fast monitor active (100ms intervals)", "INFO")
+    
+    consecutive_failures = 0
+    last_previews = {}
+    last_log_time = time.time()
+    
+    while monitor_running:
+        loop_start = time.time()
+        
+        try:
+            if not driver:
+                debug_print("Driver not available", "ERROR")
+                time.sleep(1)
+                continue
+            
+            # Check if we're on WhatsApp Web
+            try:
+                current_url = driver.current_url
+                if "web.whatsapp.com" not in current_url:
+                    debug_print(f"Not on WhatsApp Web: {current_url}", "WARNING")
+                    driver.get("https://web.whatsapp.com")
+                    time.sleep(3)
+                    continue
+            except:
+                debug_print("Cannot get current URL, driver may be dead", "ERROR")
+                time.sleep(2)
+                continue
+            
+            # Get first 3 chats using multiple methods
+            try:
+                chat_elements = driver.find_elements(By.XPATH, '//div[@role="listitem"]')
+                
+                if len(chat_elements) == 0:
+                    chat_elements = driver.find_elements(By.XPATH, '//div[@role="row"]')
+                
+                if len(chat_elements) == 0:
+                    chat_elements = driver.find_elements(By.XPATH, '//div[contains(@class, "chat")]')
+                
+                chat_count = len(chat_elements)
+                
+                if time.time() - last_log_time > 10:
+                    debug_print(f"Found {chat_count} chats in sidebar", "DEBUG")
+                    last_log_time = time.time()
+                
+                # Process first 3 chats
+                for i, chat in enumerate(chat_elements[:3]):
+                    try:
+                        # Get chat name
+                        chat_name = None
+                        try:
+                            name_element = chat.find_element(By.XPATH, './/span[@dir="auto" and @title]')
+                            chat_name = name_element.get_attribute("title")
+                        except:
+                            try:
+                                name_element = chat.find_element(By.XPATH, './/span[@dir="auto"]')
+                                chat_name = name_element.text
+                            except:
+                                pass
+                        
+                        if not chat_name:
+                            continue
+                        
+                        # Get preview text
+                        preview = ""
+                        try:
+                            preview_elements = chat.find_elements(By.XPATH, './/span[contains(@class, "selectable-text")]')
+                            if preview_elements:
+                                preview = preview_elements[-1].text.strip()
+                            else:
+                                spans = chat.find_elements(By.XPATH, './/span[@dir="ltr"]')
+                                for span in spans[-3:]:
+                                    if span.text and len(span.text.strip()) > 0:
+                                        preview = span.text.strip()
+                                        break
+                        except:
+                            pass
+                        
+                        if not preview:
+                            continue
+                        
+                        if random.random() < 0.01:
+                            debug_print(f"Chat '{chat_name}': '{preview[:30]}...'", "DEBUG")
+                        
+                        last_preview = last_previews.get(chat_name, "")
+                        
+                        if preview != last_preview:
+                            debug_print(f"🆕 New message in '{chat_name}': '{preview[:50]}...'", "INFO")
+                            
+                            # Check for "king" (case insensitive) - FAST REPLY
+                            if re.search(r'king', preview, re.IGNORECASE):
+                                debug_print(f"🎯 TRIGGER: 'king' found in '{chat_name}'", "SUCCESS")
+                                
+                                with cooldown_lock:
+                                    last_reply_time = reply_cooldown.get(chat_name, 0)
+                                    current_time = time.time() * 1000
+                                    
+                                    if current_time - last_reply_time > COOLDOWN_MS:
+                                        reply_cooldown[chat_name] = current_time
+                                        
+                                        success = ultra_fast_reply(chat_name, "us")
+                                        
+                                        if success:
+                                            debug_print(f"✅ Auto-replied to '{chat_name}' with 'us'", "SUCCESS")
+                                        else:
+                                            debug_print(f"❌ Failed to reply to '{chat_name}'", "ERROR")
+                                    else:
+                                        remaining = COOLDOWN_MS - (current_time - last_reply_time)
+                                        debug_print(f"⏳ Cooldown '{chat_name}': {remaining:.0f}ms", "DEBUG")
+                            
+                            # Check for Google Drive links
+                            elif is_google_drive_link(preview):
+                                debug_print(f"📁 Google Drive link detected in '{chat_name}'", "INFO")
+                                
+                                with cooldown_lock:
+                                    last_drive_time = drive_cooldown.get(chat_name, 0)
+                                    current_time = time.time()
+                                    
+                                    if current_time - last_drive_time > DRIVE_COOLDOWN:
+                                        drive_cooldown[chat_name] = current_time
+                                        
+                                        # Capture chat_name for the thread
+                                        thread_chat_name = chat_name
+                                        thread_preview = preview
+                                        
+                                        # Process in a separate thread
+                                        def process_drive_link(chat_name_param, preview_param):
+                                            try:
+                                                drive_url = extract_drive_url(preview_param)
+                                                if drive_url:
+                                                    debug_print(f"🔗 Extracted URL: {drive_url}", "INFO")
+                                                    
+                                                    direct_link = get_direct_download_link(drive_url)
+                                                    
+                                                    if direct_link:
+                                                        # Send as plain text without markdown to avoid Unicode issues
+                                                        reply_text = f"Direct Download Link: {direct_link}"
+                                                        success = ultra_fast_reply(chat_name_param, reply_text)
+                                                        
+                                                        if success:
+                                                            debug_print(f"✅ Sent direct link to '{chat_name_param}'", "SUCCESS")
+                                                        else:
+                                                            debug_print(f"❌ Failed to send direct link to '{chat_name_param}'", "ERROR")
+                                                    else:
+                                                        debug_print(f"❌ Could not get direct link for {drive_url}", "ERROR")
+                                                else:
+                                                    debug_print(f"❌ Could not extract drive URL from message", "ERROR")
+                                            except Exception as e:
+                                                debug_print(f"❌ Error processing drive link: {e}", "ERROR")
+                                        
+                                        Thread(target=process_drive_link, args=(thread_chat_name, thread_preview), daemon=True).start()
+                                        
+                                        debug_print(f"⏳ Processing drive link for '{chat_name}' in background", "INFO")
+                                    else:
+                                        remaining = DRIVE_COOLDOWN - (current_time - last_drive_time)
+                                        debug_print(f"⏳ Drive cooldown '{chat_name}': {remaining:.0f}s", "DEBUG")
+                            
+                            last_previews[chat_name] = preview
+                        
+                    except StaleElementReferenceException:
+                        continue
+                    except Exception as e:
+                        debug_print(f"Error processing chat: {e}", "DEBUG")
+                        continue
+                        
+            except Exception as e:
+                debug_print(f"Error getting chats: {e}", "DEBUG")
+                consecutive_failures += 1
+                
+                if consecutive_failures > 10:
+                    debug_print("Too many failures, refreshing page", "WARNING")
+                    try:
+                        driver.refresh()
+                        time.sleep(5)
+                    except:
+                        pass
+                    consecutive_failures = 0
+            
+            elapsed = (time.time() - loop_start) * 1000
+            sleep_time = max(0.001, 0.1 - (elapsed / 1000))
+            time.sleep(sleep_time)
+            
+        except Exception as e:
+            debug_print(f"Monitor error: {e}", "ERROR")
+            time.sleep(0.5)
+
+def keep_alive_minimal():
+    """Minimal keep-alive to maintain session"""
+    global keep_alive_running
+    debug_print("Keep-alive thread started", "INFO")
+    
+    while keep_alive_running:
+        time.sleep(30)
+        try:
+            if driver:
+                driver.execute_script("window.scrollBy(0,1)")
+                debug_print("Keep-alive ping", "DEBUG")
+        except Exception as e:
+            debug_print(f"Keep-alive error: {e}", "ERROR")
+            try:
+                driver.get("https://web.whatsapp.com")
+                time.sleep(5)
+            except:
+                pass
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🤖 *ULTRA-FAST WhatsApp Auto-Reply*\n\n"
+        "⚡ *Features:*\n"
+        "• Scans every 100ms (10x/sec)\n"
+        "• Replies in <500ms when triggered\n"
+        f"• {COOLDOWN_MS//1000}s cooldown for 'king' → 'us'\n"
+        "• Google Drive link detection\n"
+        f"• {DRIVE_COOLDOWN}s cooldown for drive links\n"
+        "• Converts drive links to direct download links\n\n"
+        "🛠️ *Commands:*\n"
+        "/status - Check status\n"
+        "/get - Screenshot\n"
+        "/stats - Reply statistics\n"
+        "/debug - Show debug info\n"
+        "/testdrive - Test drive link conversion",
+        parse_mode='Markdown'
+    )
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        with cooldown_lock:
+            king_replies = len(reply_cooldown)
+            drive_replies = len(drive_cooldown)
+        
+        await update.message.reply_text(
+            f"📊 *Statistics*\n\n"
+            f"• 'king' replies: {king_replies}\n"
+            f"• Drive links processed: {drive_replies}\n"
+            f"• Scan rate: 10 Hz\n"
+            f"• Cooldown (king): {COOLDOWN_MS//1000}s\n"
+            f"• Cooldown (drive): {DRIVE_COOLDOWN}s",
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ {e}")
+
+async def debug_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show debug information"""
+    try:
+        # Get chat count
+        try:
+            chats = driver.find_elements(By.XPATH, '//div[@role="listitem"]')
+            chat_count = len(chats)
+        except:
+            chat_count = "Unknown"
+        
+        # Get current URL
+        try:
+            url = driver.current_url
+        except:
+            url = "Disconnected"
+        
+        # Test drive API
+        api_status = "Unknown"
+        try:
+            test_response = requests.get(DRIVE_API_URL, params={'url': 'test'}, headers={'ngrok-skip-browser-warning': 'true'}, timeout=5)
+            api_status = "OK" if test_response.status_code < 500 else f"Error {test_response.status_code}"
+        except Exception as e:
+            api_status = f"Unreachable ({str(e)[:30]})"
+        
+        debug_text = (
+            f"🔍 *Debug Info*\n\n"
+            f"• URL: {url}\n"
+            f"• Chats found: {chat_count}\n"
+            f"• Drive API URL: {DRIVE_API_URL}\n"
+            f"• Drive API Status: {api_status}\n"
+            f"• Monitor running: {monitor_running}\n"
+            f"• Keep-alive: Active\n"
+            f"• Time: {datetime.now().strftime('%H:%M:%S')}"
+        )
+        
+        await update.message.reply_text(debug_text, parse_mode='Markdown')
+        
+        # Also send a screenshot
+        await get_screenshot(update, context)
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ {e}")
+
+async def get_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
+        screenshot_bytes = driver.get_screenshot_as_png()
+        img = Image.open(io.BytesIO(screenshot_bytes))
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        output = io.BytesIO()
+        img.save(output, format='JPEG', quality=85)
+        
+        await update.message.reply_photo(
+            photo=output.getvalue(),
+            caption=f"📱 WhatsApp - {datetime.now().strftime('%H:%M:%S')}"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ {e}")
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        with cooldown_lock:
+            king_count = len(reply_cooldown)
+            drive_count = len(drive_cooldown)
+        
+        await update.message.reply_text(
+            f"🤖 *Bot Status*\n\n"
+            f"✅ Running\n"
+            f"⚡ Scan: 100ms intervals\n"
+            f"👑 'king' replies: {king_count}\n"
+            f"📁 Drive replies: {drive_count}\n"
+            f"🎯 Triggers:\n"
+            f"  • 'king' → 'us' (instant)\n"
+            f"  • Google Drive links → direct links (slow)\n"
+            f"⏱️ Cooldowns: king {COOLDOWN_MS//1000}s | drive {DRIVE_COOLDOWN}s\n\n"
+            f"Use /debug for more details",
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ {e}")
+
+async def test_drive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Test command to convert a drive link"""
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Please provide a Google Drive link\n"
+            "Example: /testdrive https://drive.google.com/file/d/xxx/view"
+        )
+        return
+    
+    drive_url = context.args[0]
+    await update.message.reply_text(f"🔄 Testing drive link: {drive_url}\n⏳ This may take up to 60 seconds...")
+    
+    # First test extraction
+    extracted = extract_drive_url(drive_url)
+    if not extracted:
+        await update.message.reply_text("❌ Failed to extract Google Drive URL from your input")
+        return
+    
+    await update.message.reply_text(f"✅ Extracted URL: {extracted}\n⏳ Getting direct download link...")
+    
+    # Get direct link
+    direct_link = get_direct_download_link(extracted)
+    
+    if direct_link:
+        await update.message.reply_text(
+            f"✅ *Direct Download Link:*\n{direct_link}",
+            parse_mode='Markdown'
+        )
+    else:
+        await update.message.reply_text(
+            "❌ Failed to get direct download link.\n"
+            "Check if the Drive API is working with /debug"
+        )
+
+def main():
+    global driver, keep_alive_running, monitor_running
+    
+    debug_print("=" * 60, "INFO")
+    debug_print("ULTRA-FAST WhatsApp Auto-Reply with Drive Links", "INFO")
+    debug_print("=" * 60, "INFO")
+    
+    # Test Drive API first
+    debug_print("🔍 Testing Drive API connection...", "INFO")
+    api_working = test_drive_api()
+    if not api_working:
+        debug_print("⚠️ Drive API test failed - check if ngrok URL is still valid", "WARNING")
+        debug_print(f"   Current API URL: {DRIVE_API_URL}", "WARNING")
+        debug_print("   You may need to update DRIVE_API_URL", "WARNING")
+    else:
+        debug_print("✅ Drive API is working correctly", "SUCCESS")
+    
+    # Load session
+    if not download_and_extract_session():
+        debug_print("❌ Failed to load session", "ERROR")
+        return
+    
+    # Initialize driver
+    driver = initialize_driver()
+    
+    # Start minimal keep-alive
+    Thread(target=keep_alive_minimal, daemon=True).start()
+    
+    # Start ultra-fast monitor (100ms)
+    monitor_thread = Thread(target=monitor_chats_ultra_fast, daemon=True)
+    monitor_thread.start()
+    debug_print(f"🚀 Monitor active: 100ms intervals", "SUCCESS")
+    
+    # Start Telegram bot
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("get", get_screenshot))
+    app.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("debug", debug_info))
+    app.add_handler(CommandHandler("testdrive", test_drive))
+    
+    debug_print("=" * 60, "INFO")
+    debug_print("🤖 Bot ready - monitoring for:", "SUCCESS")
+    debug_print("  • 'king' messages → instant 'us' reply", "INFO")
+    debug_print("  • Google Drive links → direct download links (slow)", "INFO")
+    if not api_working:
+        debug_print("  ⚠️ Drive API is not working - check URL with /debug", "WARNING")
+    debug_print("=" * 60, "INFO")
+    
+    try:
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
+    finally:
+        keep_alive_running = False
+        monitor_running = False
+        if driver:
+            driver.quit()
+
+if __name__ == '__main__':
+    print("\n" + "="*60)
+    print("Starting ULTRA-FAST WhatsApp Auto-Reply Bot...")
+    print("="*60)
+    print("\n📱 Send /start to your bot on Telegram")
+    print("⚠️ Press Ctrl+C to stop")
+    print("="*60 + "\n")
+    
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\n👋 Bot stopped by user")
+        keep_alive_running = False
+        monitor_running = False
+        if driver:
+            driver.quit()
+    except Exception as e:
+        print(f"❌ Error: {e}")

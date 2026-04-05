@@ -1,0 +1,765 @@
+#!/usr/bin/env python3
+"""
+Complete Video Editor Bot - EXACT COPY of Original Colab Script
+WITH AUDIO LOOP & SPEED CONTROL
+"""
+
+import os
+import sys
+import subprocess
+import time
+import uuid
+import asyncio
+import nest_asyncio
+
+# ======================== SYSTEM DEPENDENCY INSTALLATION ========================
+def install_system_dependencies():
+    """Install required system packages EXACTLY like original Colab commands"""
+    print("🔧 Installing system dependencies...")
+    
+    # EXACT same commands as original
+    subprocess.run("apt-get update", shell=True, check=False)
+    subprocess.run("apt-get install -y ffmpeg", shell=True, check=False)
+    
+    print("✓ System dependencies installed")
+
+# ======================== PYTHON PACKAGE INSTALLATION ========================
+def install_python_packages():
+    """Install Python packages EXACTLY like original Colab commands"""
+    print("📦 Installing Python packages...")
+    
+    # EXACT same pip install command
+    subprocess.run(f"{sys.executable} -m pip install pyrogram==2.0.106 tgcrypto nest_asyncio", shell=True, check=False)
+    
+    print("✓ Python packages installed")
+
+# Run installations first (EXACTLY like original Colab order)
+print("="*50)
+print("Complete Video Editor Bot for Python - WITH AUDIO LOOP & SPEED CONTROL")
+print("="*50)
+install_system_dependencies()
+install_python_packages()
+
+# ======================== NOW IMPORT ALL LIBRARIES AFTER INSTALLATION ========================
+print("\n📚 Importing libraries...")
+try:
+    from pyrogram import Client, filters
+    from pyrogram.types import Message
+    import nest_asyncio
+    print("✓ All libraries imported successfully")
+except ImportError as e:
+    print(f"⚠️ Import error: {e}")
+    print("🔄 Retrying installation...")
+    install_python_packages()
+    from pyrogram import Client, filters
+    from pyrogram.types import Message
+    import nest_asyncio
+    print("✓ Libraries imported on second attempt")
+
+# Apply nest_asyncio to fix event loop issue
+nest_asyncio.apply()
+
+# Your credentials
+API_ID = 32086282
+API_HASH = "064a66fe7097452e6ac8f4e8df28aa97"
+BOT_TOKEN = "7686548563:AAGTp_iSrcBmK3n4_c5Z3yCK8nikCowDYms"
+
+# Create directories with absolute paths
+BASE_DIR = os.getcwd()
+DOWNLOADS_DIR = os.path.join(BASE_DIR, "downloads")
+EDITED_DIR = os.path.join(BASE_DIR, "edited_videos")
+
+os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+os.makedirs(EDITED_DIR, exist_ok=True)
+
+# Storage for user sessions
+user_sessions = {}
+
+# Video processing functions
+def run_ffmpeg_command(cmd):
+    """Run ffmpeg command and return success status"""
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        return True, None
+    except subprocess.CalledProcessError as e:
+        return False, e.stderr
+
+def merge_videos(input_files, output_path):
+    """Merge multiple videos"""
+    temp_list = os.path.join(DOWNLOADS_DIR, f"inputs_{uuid.uuid4().hex}.txt")
+    with open(temp_list, "w") as f:
+        for fpath in input_files:
+            f.write(f"file '{fpath}'\n")
+    success, error = run_ffmpeg_command(
+        ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", temp_list, "-c", "copy", output_path]
+    )
+    os.remove(temp_list)
+    return success, error
+
+def trim_video(input_path, output_path, start_time, end_time):
+    """Trim video"""
+    return run_ffmpeg_command(
+        ["ffmpeg", "-y", "-i", input_path, "-ss", start_time, "-to", end_time, "-c", "copy", output_path]
+    )
+
+def compress_video(input_path, output_path, quality="medium"):
+    """Compress video"""
+    crf = {"low": 28, "medium": 23, "high": 18}.get(quality, 23)
+    return run_ffmpeg_command(
+        ["ffmpeg", "-y", "-i", input_path, "-vcodec", "libx264", "-crf", str(crf), output_path]
+    )
+
+def remove_audio(input_path, output_path):
+    """Remove audio from video"""
+    return run_ffmpeg_command(
+        ["ffmpeg", "-y", "-i", input_path, "-an", "-c:v", "copy", output_path]
+    )
+
+def add_audio_with_loop(input_path, audio_path, output_path):
+    """
+    Add audio to video with looping if audio is shorter than video
+    Uses complex filter to loop audio to match video duration
+    """
+    # First get video duration
+    cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", input_path]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    video_duration = float(result.stdout.strip())
+    
+    # Create filter complex: loop audio to match video duration
+    # amovie=audio.mp3:loop=0,asetpts=N/SR/TB[audio] means loop audio infinitely and adjust timestamps
+    filter_complex = f"amovie={audio_path}:loop=0,asetpts=N/SR/TB[a]"
+    
+    return run_ffmpeg_command(
+        ["ffmpeg", "-y", "-i", input_path, "-filter_complex", filter_complex, 
+         "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", 
+         "-shortest", "-t", str(video_duration), output_path]
+    )
+
+def change_video_speed(input_path, output_path, speed_factor):
+    """Change video speed (0.25x to 4x)"""
+    # Adjust video speed
+    video_filter = f"setpts={1/float(speed_factor)}*PTS"
+    # Adjust audio speed
+    audio_filter = f"atempo={min(float(speed_factor), 2.0)}"
+    
+    # If speed > 2.0, need multiple atempo filters (max 2.0 per filter)
+    if float(speed_factor) > 2.0:
+        # For speeds > 2.0, we need multiple atempo filters
+        factors = []
+        remaining = float(speed_factor)
+        while remaining > 2.0:
+            factors.append("atempo=2.0")
+            remaining /= 2.0
+        factors.append(f"atempo={remaining}")
+        audio_filter = ",".join(factors)
+    
+    filter_complex = f"[0:v]{video_filter}[v];[0:a]{audio_filter}[a]"
+    
+    return run_ffmpeg_command(
+        ["ffmpeg", "-y", "-i", input_path, "-filter_complex", filter_complex,
+         "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-c:a", "aac", output_path]
+    )
+
+def crop_video(input_path, output_path, width, height):
+    """Crop video to custom dimensions"""
+    return run_ffmpeg_command(
+        ["ffmpeg", "-y", "-i", input_path, "-vf", f"crop={width}:{height}", "-c:a", "copy", output_path]
+    )
+
+def crop_aspect_ratio(input_path, output_path, aspect_ratio):
+    """Crop video to specific aspect ratio (e.g., 9:16, 16:9, 1:1)"""
+    ratios = {
+        "9:16": "ih*9/16:ih",
+        "16:9": "iw:iw*9/16",
+        "1:1": "min(iw,ih):min(iw,ih)",
+        "4:3": "iw:iw*3/4",
+        "3:4": "ih*3/4:ih"
+    }
+    crop_filter = ratios.get(aspect_ratio, "iw:ih")
+    return run_ffmpeg_command(
+        ["ffmpeg", "-y", "-i", input_path, "-vf", f"crop={crop_filter}", "-c:a", "copy", output_path]
+    )
+
+def extract_audio(input_path, output_path):
+    """Extract audio from video"""
+    return run_ffmpeg_command(
+        ["ffmpeg", "-y", "-i", input_path, "-q:a", "0", "-map", "a", output_path]
+    )
+
+# Create bot client
+app = Client("video_editor_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+
+# Start command
+@app.on_message(filters.command("start"))
+async def start_command(client, message: Message):
+    welcome_text = """
+🎬 **Welcome to Complete Video Editor Bot!**
+
+I can help you edit your videos with these features:
+
+**Basic Commands:**
+/merge - Merge multiple videos
+/trim - Trim video
+/compress - Compress video
+/speed - Change video speed (0.25x to 4x)
+
+**Audio Commands:**
+/remove_audio - Remove audio from video
+/add_audio - Add audio to video (loops if needed)
+/extract_audio - Extract audio from video
+
+**Crop Commands:**
+/crop - Crop to custom dimensions (width:height)
+/crop_9x16 - Crop to 9:16 aspect ratio
+/crop_16x9 - Crop to 16:9 aspect ratio
+/crop_1x1 - Crop to square
+
+**How to use:**
+1. Send me a video
+2. Reply with the command
+3. Follow the instructions
+
+Send /help for detailed usage.
+"""
+    await message.reply_text(welcome_text)
+
+# Help command
+@app.on_message(filters.command("help"))
+async def help_command(client, message: Message):
+    help_text = """
+📚 **Detailed Command Usage**
+
+**Trim Video:**
+/trim start_time end_time
+Example: /trim 00:00:10 00:01:30
+
+**Compress Video:**
+/compress [low/medium/high]
+Example: /compress low
+
+**Speed Video:**
+/speed [0.25-4.0]
+Example: /speed 0.5 (half speed)
+Example: /speed 2.0 (double speed)
+
+**Merge Videos:**
+1. Send /merge
+2. Send videos one by one
+3. Type /done when finished
+
+**Remove Audio:**
+/remove_audio
+(Reply to a video)
+
+**Add Audio:**
+/add_audio
+(Reply to a video, then send audio file)
+*Audio will loop to match video length*
+
+**Extract Audio:**
+/extract_audio
+(Reply to a video)
+
+**Crop Commands:**
+/crop width height
+Example: /crop 720 1280
+
+/crop_9x16 - Portrait (9:16)
+/crop_16x9 - Landscape (16:9)
+/crop_1x1 - Square (1:1)
+"""
+    await message.reply_text(help_text)
+
+# Merge command
+@app.on_message(filters.command("merge"))
+async def merge_command(client, message: Message):
+    user_id = message.from_user.id
+    user_sessions[user_id] = {"state": "merging", "videos": []}
+    await message.reply_text(
+        "📁 **Video Merger**\n\n"
+        "Send me the videos you want to merge one by one.\n"
+        "Type **/done** when finished.\n"
+        "Type **/cancel** to cancel."
+    )
+
+# Cancel command
+@app.on_message(filters.command("cancel"))
+async def cancel_command(client, message: Message):
+    user_id = message.from_user.id
+    if user_id in user_sessions:
+        # Clean up any downloaded files
+        if "videos" in user_sessions[user_id]:
+            for video in user_sessions[user_id]["videos"]:
+                try:
+                    os.remove(video)
+                except:
+                    pass
+        if "video_path" in user_sessions[user_id]:
+            try:
+                os.remove(user_sessions[user_id]["video_path"])
+            except:
+                pass
+        del user_sessions[user_id]
+    await message.reply_text("❌ Operation cancelled.")
+
+# Collect videos
+@app.on_message(filters.video)
+async def handle_video(client, message: Message):
+    user_id = message.from_user.id
+    
+    # Download video with proper path
+    file_name = f"video_{user_id}_{uuid.uuid4().hex}.mp4"
+    file_path = os.path.join(DOWNLOADS_DIR, file_name)
+    file_path = await message.download(file_name=file_path)
+    
+    # Check if user is in merge mode
+    if user_id in user_sessions and user_sessions[user_id].get("state") == "merging":
+        user_sessions[user_id]["videos"].append(file_path)
+        count = len(user_sessions[user_id]["videos"])
+        await message.reply_text(f"✅ Video {count} added. Send more or type **/done** to merge.")
+    
+    # Check if user is in add_audio mode
+    elif user_id in user_sessions and user_sessions[user_id].get("state") == "waiting_for_audio":
+        await message.reply_text("❌ Expected an audio file, but got a video. Please send an audio file or type /cancel")
+        # Clean up the downloaded video
+        try:
+            os.remove(file_path)
+        except:
+            pass
+    
+    else:
+        await message.reply_text(
+            "✅ Video received!\n"
+            "Reply with a command:\n"
+            "/trim - Trim\n"
+            "/compress - Compress\n"
+            "/speed - Change speed\n"
+            "/remove_audio - Remove audio\n"
+            "/extract_audio - Extract audio\n"
+            "/crop - Crop video\n"
+            "/merge - Merge with others"
+        )
+
+# Handle audio files
+@app.on_message(filters.audio)
+async def handle_audio(client, message: Message):
+    user_id = message.from_user.id
+    
+    if user_id in user_sessions and user_sessions[user_id].get("state") == "waiting_for_audio":
+        # Download audio
+        audio_name = f"audio_{user_id}_{uuid.uuid4().hex}.mp3"
+        audio_path = os.path.join(DOWNLOADS_DIR, audio_name)
+        audio_path = await message.download(file_name=audio_path)
+        
+        video_path = user_sessions[user_id].get("video_path")
+        
+        if video_path and os.path.exists(video_path):
+            await message.reply_text("⚙️ Adding audio to video (looping if needed)...")
+            
+            output_path = os.path.join(EDITED_DIR, f"audio_added_{user_id}_{uuid.uuid4().hex}.mp4")
+            success, error = add_audio_with_loop(video_path, audio_path, output_path)
+            
+            if success and os.path.exists(output_path):
+                await message.reply_video(output_path, caption="✅ Audio added successfully! (Looped to match video length)")
+                os.remove(output_path)
+            else:
+                await message.reply_text(f"❌ Error: {error[:200] if error else 'Unknown error'}")
+            
+            # Cleanup
+            try:
+                os.remove(video_path)
+                os.remove(audio_path)
+            except:
+                pass
+        else:
+            await message.reply_text("❌ Original video not found. Please start over with /add_audio")
+        
+        del user_sessions[user_id]
+    
+    else:
+        await message.reply_text("🎵 Audio received! Use /add_audio after sending a video to add this audio.")
+
+# Done merging
+@app.on_message(filters.command("done"))
+async def done_merging(client, message: Message):
+    user_id = message.from_user.id
+    
+    if user_id not in user_sessions or user_sessions[user_id].get("state") != "merging":
+        return await message.reply_text("❌ No active merge session. Start with /merge")
+    
+    videos = user_sessions[user_id].get("videos", [])
+    if len(videos) < 2:
+        await message.reply_text("❌ Need at least 2 videos to merge. Send more videos or type /cancel")
+        return
+    
+    await message.reply_text("⚙️ Merging videos... This may take a moment.")
+    
+    output_path = os.path.join(EDITED_DIR, f"merged_{user_id}_{uuid.uuid4().hex}.mp4")
+    success, error = merge_videos(videos, output_path)
+    
+    if success and os.path.exists(output_path):
+        await message.reply_video(output_path, caption="✅ Videos merged successfully!")
+        os.remove(output_path)
+    else:
+        await message.reply_text(f"❌ Error merging videos: {error[:200] if error else 'Unknown error'}")
+    
+    # Cleanup individual videos
+    for video in videos:
+        try:
+            os.remove(video)
+        except:
+            pass
+    
+    del user_sessions[user_id]
+
+# Trim command
+@app.on_message(filters.command("trim"))
+async def trim_command(client, message: Message):
+    if len(message.command) < 3:
+        await message.reply_text(
+            "❌ **Usage:** /trim start_time end_time\n"
+            "Example: /trim 00:00:10 00:01:30\n"
+            "Format: HH:MM:SS"
+        )
+        return
+    
+    if not message.reply_to_message or not message.reply_to_message.video:
+        await message.reply_text("❌ Please reply to a video with this command.")
+        return
+    
+    user_id = message.from_user.id
+    start_time = message.command[1]
+    end_time = message.command[2]
+    
+    status_msg = await message.reply_text("✂️ Downloading video...")
+    
+    # Download video
+    file_name = f"trim_input_{user_id}_{uuid.uuid4().hex}.mp4"
+    input_path = os.path.join(DOWNLOADS_DIR, file_name)
+    input_path = await message.reply_to_message.download(file_name=input_path)
+    
+    await status_msg.edit_text("✂️ Trimming video...")
+    
+    output_path = os.path.join(EDITED_DIR, f"trimmed_{user_id}_{uuid.uuid4().hex}.mp4")
+    success, error = trim_video(input_path, output_path, start_time, end_time)
+    
+    if success and os.path.exists(output_path):
+        await status_msg.delete()
+        await message.reply_video(output_path, caption=f"✅ Trimmed from {start_time} to {end_time}!")
+        os.remove(output_path)
+    else:
+        await status_msg.edit_text(f"❌ Error: {error[:200] if error else 'Unknown error'}")
+    
+    os.remove(input_path)
+
+# Compress command
+@app.on_message(filters.command("compress"))
+async def compress_command(client, message: Message):
+    quality = message.command[1] if len(message.command) > 1 else "medium"
+    
+    if quality not in ["low", "medium", "high"]:
+        await message.reply_text("❌ Quality must be: low, medium, or high")
+        return
+    
+    if not message.reply_to_message or not message.reply_to_message.video:
+        await message.reply_text("❌ Please reply to a video with this command.")
+        return
+    
+    user_id = message.from_user.id
+    status_msg = await message.reply_text("📦 Downloading video...")
+    
+    # Download video
+    file_name = f"compress_input_{user_id}_{uuid.uuid4().hex}.mp4"
+    input_path = os.path.join(DOWNLOADS_DIR, file_name)
+    input_path = await message.reply_to_message.download(file_name=input_path)
+    
+    await status_msg.edit_text(f"📦 Compressing with {quality} quality...")
+    
+    output_path = os.path.join(EDITED_DIR, f"compressed_{user_id}_{uuid.uuid4().hex}.mp4")
+    success, error = compress_video(input_path, output_path, quality)
+    
+    if success and os.path.exists(output_path):
+        await status_msg.delete()
+        await message.reply_video(output_path, caption=f"✅ Compressed with {quality} quality!")
+        os.remove(output_path)
+    else:
+        await status_msg.edit_text(f"❌ Error: {error[:200] if error else 'Unknown error'}")
+    
+    os.remove(input_path)
+
+# Speed command - NEW FEATURE
+@app.on_message(filters.command("speed"))
+async def speed_command(client, message: Message):
+    if len(message.command) < 2:
+        await message.reply_text(
+            "❌ **Usage:** /speed [0.25-4.0]\n"
+            "Examples:\n"
+            "/speed 0.5 - Half speed (slow motion)\n"
+            "/speed 2.0 - Double speed (fast forward)\n"
+            "/speed 1.0 - Normal speed\n"
+            "Range: 0.25 to 4.0"
+        )
+        return
+    
+    try:
+        speed_factor = float(message.command[1])
+        if speed_factor < 0.25 or speed_factor > 4.0:
+            await message.reply_text("❌ Speed factor must be between 0.25 and 4.0")
+            return
+    except ValueError:
+        await message.reply_text("❌ Speed must be a number (e.g., 0.5, 1.5, 2.0)")
+        return
+    
+    if not message.reply_to_message or not message.reply_to_message.video:
+        await message.reply_text("❌ Please reply to a video with this command.")
+        return
+    
+    user_id = message.from_user.id
+    status_msg = await message.reply_text("⚡ Downloading video...")
+    
+    # Download video
+    file_name = f"speed_input_{user_id}_{uuid.uuid4().hex}.mp4"
+    input_path = os.path.join(DOWNLOADS_DIR, file_name)
+    input_path = await message.reply_to_message.download(file_name=input_path)
+    
+    speed_text = "slow motion" if speed_factor < 1.0 else "fast forward" if speed_factor > 1.0 else "normal speed"
+    await status_msg.edit_text(f"⚡ Changing speed to {speed_factor}x ({speed_text})...")
+    
+    output_path = os.path.join(EDITED_DIR, f"speed_{speed_factor}x_{user_id}_{uuid.uuid4().hex}.mp4")
+    success, error = change_video_speed(input_path, output_path, speed_factor)
+    
+    if success and os.path.exists(output_path):
+        await status_msg.delete()
+        await message.reply_video(output_path, caption=f"✅ Speed changed to {speed_factor}x!")
+        os.remove(output_path)
+    else:
+        await status_msg.edit_text(f"❌ Error: {error[:200] if error else 'Unknown error'}")
+    
+    os.remove(input_path)
+
+# Remove audio command
+@app.on_message(filters.command("remove_audio"))
+async def remove_audio_command(client, message: Message):
+    if not message.reply_to_message or not message.reply_to_message.video:
+        await message.reply_text("❌ Please reply to a video with this command.")
+        return
+    
+    user_id = message.from_user.id
+    status_msg = await message.reply_text("🔇 Removing audio...")
+    
+    # Download video
+    file_name = f"remove_audio_input_{user_id}_{uuid.uuid4().hex}.mp4"
+    input_path = os.path.join(DOWNLOADS_DIR, file_name)
+    input_path = await message.reply_to_message.download(file_name=input_path)
+    
+    output_path = os.path.join(EDITED_DIR, f"no_audio_{user_id}_{uuid.uuid4().hex}.mp4")
+    success, error = remove_audio(input_path, output_path)
+    
+    if success and os.path.exists(output_path):
+        await status_msg.delete()
+        await message.reply_video(output_path, caption="✅ Audio removed successfully!")
+        os.remove(output_path)
+    else:
+        await status_msg.edit_text(f"❌ Error: {error[:200] if error else 'Unknown error'}")
+    
+    os.remove(input_path)
+
+# Add audio command (UPDATED with looping)
+@app.on_message(filters.command("add_audio"))
+async def add_audio_command(client, message: Message):
+    if not message.reply_to_message or not message.reply_to_message.video:
+        await message.reply_text("❌ Please reply to a video with this command.")
+        return
+    
+    user_id = message.from_user.id
+    
+    # Download video
+    file_name = f"add_audio_input_{user_id}_{uuid.uuid4().hex}.mp4"
+    input_path = os.path.join(DOWNLOADS_DIR, file_name)
+    input_path = await message.reply_to_message.download(file_name=input_path)
+    
+    # Store video path and wait for audio
+    user_sessions[user_id] = {
+        "state": "waiting_for_audio",
+        "video_path": input_path
+    }
+    
+    await message.reply_text(
+        "🎵 Now send me the audio file you want to add to this video.\n"
+        "The audio will **loop automatically** if it's shorter than the video.\n"
+        "Type **/cancel** to cancel."
+    )
+
+# Extract audio command
+@app.on_message(filters.command("extract_audio"))
+async def extract_audio_command(client, message: Message):
+    if not message.reply_to_message or not message.reply_to_message.video:
+        await message.reply_text("❌ Please reply to a video with this command.")
+        return
+    
+    user_id = message.from_user.id
+    status_msg = await message.reply_text("🎵 Extracting audio...")
+    
+    # Download video
+    file_name = f"extract_audio_input_{user_id}_{uuid.uuid4().hex}.mp4"
+    input_path = os.path.join(DOWNLOADS_DIR, file_name)
+    input_path = await message.reply_to_message.download(file_name=input_path)
+    
+    output_path = os.path.join(EDITED_DIR, f"audio_{user_id}_{uuid.uuid4().hex}.mp3")
+    success, error = extract_audio(input_path, output_path)
+    
+    if success and os.path.exists(output_path):
+        await status_msg.delete()
+        await message.reply_audio(output_path, caption="✅ Audio extracted successfully!")
+        os.remove(output_path)
+    else:
+        await status_msg.edit_text(f"❌ Error: {error[:200] if error else 'Unknown error'}")
+    
+    os.remove(input_path)
+
+# Crop command (custom dimensions)
+@app.on_message(filters.command("crop"))
+async def crop_command(client, message: Message):
+    if len(message.command) < 3:
+        await message.reply_text(
+            "❌ **Usage:** /crop width height\n"
+            "Example: /crop 720 1280 (for 9:16 portrait)\n"
+            "Example: /crop 1280 720 (for 16:9 landscape)"
+        )
+        return
+    
+    if not message.reply_to_message or not message.reply_to_message.video:
+        await message.reply_text("❌ Please reply to a video with this command.")
+        return
+    
+    try:
+        width = int(message.command[1])
+        height = int(message.command[2])
+    except ValueError:
+        await message.reply_text("❌ Width and height must be numbers")
+        return
+    
+    user_id = message.from_user.id
+    status_msg = await message.reply_text("✂️ Cropping video...")
+    
+    # Download video
+    file_name = f"crop_input_{user_id}_{uuid.uuid4().hex}.mp4"
+    input_path = os.path.join(DOWNLOADS_DIR, file_name)
+    input_path = await message.reply_to_message.download(file_name=input_path)
+    
+    output_path = os.path.join(EDITED_DIR, f"cropped_{user_id}_{uuid.uuid4().hex}.mp4")
+    success, error = crop_video(input_path, output_path, width, height)
+    
+    if success and os.path.exists(output_path):
+        await status_msg.delete()
+        await message.reply_video(output_path, caption=f"✅ Cropped to {width}x{height}!")
+        os.remove(output_path)
+    else:
+        await status_msg.edit_text(f"❌ Error: {error[:200] if error else 'Unknown error'}")
+    
+    os.remove(input_path)
+
+# Crop to 9:16 aspect ratio
+@app.on_message(filters.command("crop_9x16"))
+async def crop_9x16_command(client, message: Message):
+    if not message.reply_to_message or not message.reply_to_message.video:
+        await message.reply_text("❌ Please reply to a video with this command.")
+        return
+    
+    user_id = message.from_user.id
+    status_msg = await message.reply_text("✂️ Cropping to 9:16 aspect ratio...")
+    
+    # Download video
+    file_name = f"crop9x16_input_{user_id}_{uuid.uuid4().hex}.mp4"
+    input_path = os.path.join(DOWNLOADS_DIR, file_name)
+    input_path = await message.reply_to_message.download(file_name=input_path)
+    
+    output_path = os.path.join(EDITED_DIR, f"cropped_9x16_{user_id}_{uuid.uuid4().hex}.mp4")
+    success, error = crop_aspect_ratio(input_path, output_path, "9:16")
+    
+    if success and os.path.exists(output_path):
+        await status_msg.delete()
+        await message.reply_video(output_path, caption="✅ Cropped to 9:16 (portrait)!")
+        os.remove(output_path)
+    else:
+        await status_msg.edit_text(f"❌ Error: {error[:200] if error else 'Unknown error'}")
+    
+    os.remove(input_path)
+
+# Crop to 16:9 aspect ratio
+@app.on_message(filters.command("crop_16x9"))
+async def crop_16x9_command(client, message: Message):
+    if not message.reply_to_message or not message.reply_to_message.video:
+        await message.reply_text("❌ Please reply to a video with this command.")
+        return
+    
+    user_id = message.from_user.id
+    status_msg = await message.reply_text("✂️ Cropping to 16:9 aspect ratio...")
+    
+    # Download video
+    file_name = f"crop16x9_input_{user_id}_{uuid.uuid4().hex}.mp4"
+    input_path = os.path.join(DOWNLOADS_DIR, file_name)
+    input_path = await message.reply_to_message.download(file_name=input_path)
+    
+    output_path = os.path.join(EDITED_DIR, f"cropped_16x9_{user_id}_{uuid.uuid4().hex}.mp4")
+    success, error = crop_aspect_ratio(input_path, output_path, "16:9")
+    
+    if success and os.path.exists(output_path):
+        await status_msg.delete()
+        await message.reply_video(output_path, caption="✅ Cropped to 16:9 (landscape)!")
+        os.remove(output_path)
+    else:
+        await status_msg.edit_text(f"❌ Error: {error[:200] if error else 'Unknown error'}")
+    
+    os.remove(input_path)
+
+# Crop to square (1:1)
+@app.on_message(filters.command("crop_1x1"))
+async def crop_1x1_command(client, message: Message):
+    if not message.reply_to_message or not message.reply_to_message.video:
+        await message.reply_text("❌ Please reply to a video with this command.")
+        return
+    
+    user_id = message.from_user.id
+    status_msg = await message.reply_text("✂️ Cropping to square (1:1)...")
+    
+    # Download video
+    file_name = f"crop1x1_input_{user_id}_{uuid.uuid4().hex}.mp4"
+    input_path = os.path.join(DOWNLOADS_DIR, file_name)
+    input_path = await message.reply_to_message.download(file_name=input_path)
+    
+    output_path = os.path.join(EDITED_DIR, f"cropped_1x1_{user_id}_{uuid.uuid4().hex}.mp4")
+    success, error = crop_aspect_ratio(input_path, output_path, "1:1")
+    
+    if success and os.path.exists(output_path):
+        await status_msg.delete()
+        await message.reply_video(output_path, caption="✅ Cropped to square (1:1)!")
+        os.remove(output_path)
+    else:
+        await status_msg.edit_text(f"❌ Error: {error[:200] if error else 'Unknown error'}")
+    
+    os.remove(input_path)
+
+print("="*50)
+print("Starting Complete Video Editor Bot...")
+print("="*50)
+print(f"📁 Downloads directory: {DOWNLOADS_DIR}")
+print(f"📁 Edited videos directory: {EDITED_DIR}")
+print("\n✨ New Features:")
+print("   • /speed - Change video speed (0.25x to 4x)")
+print("   • /add_audio - Audio now loops to match video length")
+
+# Run the bot properly with asyncio
+async def main():
+    await app.start()
+    print("\n✅ Bot is now running! Send /start to your bot on Telegram")
+    await asyncio.Event().wait()  # Keep running
+
+# Start the bot
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n\n👋 Bot stopped by user")
+    except Exception as e:
+        print(f"❌ Error: {e}")

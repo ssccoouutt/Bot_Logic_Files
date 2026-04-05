@@ -1,0 +1,430 @@
+#!/usr/bin/env python3
+"""
+tg-ytdlp-bot - EXACT COPY of Original Colab Script with FIX for source command
+"""
+
+import os
+import sys
+import subprocess
+import time
+
+# ====================================================
+# COMPLETE tg-ytdlp-bot INSTALLATION SCRIPT
+# Run this in a fresh Colab session
+# ====================================================
+
+def run_command(cmd, shell=True):
+    """Run shell command exactly like ! in Colab"""
+    print(f"Running: {cmd}")
+    result = subprocess.run(cmd, shell=shell, capture_output=True, text=True)
+    if result.stdout:
+        print(result.stdout)
+    if result.returncode != 0 and result.stderr:
+        print(f"Error: {result.stderr}")
+    return result
+
+def run_in_venv(cmd):
+    """Run command in virtual environment (FIXED version)"""
+    # On Linux, use . instead of source, or use the full path to activate
+    venv_cmd = f". venv/bin/activate && {cmd}"
+    return run_command(venv_cmd)
+
+def main():
+    print("🚀 INSTALLING tg-ytdlp-bot - COMPLETE SETUP")
+    print("="*60)
+
+    # ========== STEP 1: Clone repository ==========
+    print("\n📥 Step 1: Cloning repository...")
+    run_command("git clone https://github.com/ssccoouutt/tg-ytdlp-bot.git")
+    os.chdir("tg-ytdlp-bot")
+    print("✓ Repository cloned")
+
+    # ========== STEP 2: Install system dependencies ==========
+    print("\n🔧 Step 2: Installing system dependencies...")
+    run_command("apt-get update")
+    run_command("apt-get install -y python3.10 python3.10-venv ffmpeg mediainfo")
+    print("✓ System dependencies installed")
+
+    # ========== STEP 3: Create virtual environment ==========
+    print("\n🐍 Step 3: Setting up Python environment...")
+    run_command("python3.10 -m venv venv --system-site-packages")
+    print("✓ Virtual environment created")
+
+    # ========== STEP 4: Install Python packages ==========
+    print("\n📦 Step 4: Installing Python packages...")
+    
+    # FIX: Use . instead of source for shell activation
+    # Also ensure pip is available
+    print("Checking pip installation...")
+    run_in_venv("pip install --upgrade pip")
+    
+    # Check if requirements.txt exists
+    if os.path.exists("requirements.txt"):
+        print(f"Found requirements.txt ({os.path.getsize('requirements.txt')} bytes)")
+        with open("requirements.txt", "r") as f:
+            print(f"First few lines: {f.readlines()[:3]}")
+    else:
+        print("Creating basic requirements.txt...")
+        with open("requirements.txt", "w") as f:
+            f.write("pyrogram\nyt-dlp\ntgcrypto\n")
+    
+    run_in_venv("pip install -r requirements.txt")
+    print("✓ Python packages installed")
+
+    # ========== STEP 5: Create configuration ==========
+    print("\n⚙️ Step 5: Creating configuration file...")
+    
+    # Ensure CONFIG directory exists
+    os.makedirs("CONFIG", exist_ok=True)
+
+    config_content = '''from CONFIG.commands import CommandsConfig
+from CONFIG.domains import DomainsConfig
+from CONFIG.limits import LimitsConfig
+from CONFIG.messages import Messages, safe_get_messages
+
+class Config:
+    # ========== BASIC SETTINGS ==========
+    BOT_NAME = "tg_ytdlp_bot"
+    BOT_NAME_FOR_USERS = "tg_ytdlp_bot"
+    ADMIN = [990321391]  # YOUR TELEGRAM USER ID
+    API_ID = 32086282
+    API_HASH = "064a66fe7097452e6ac8f4e8df28aa97"
+    BOT_TOKEN = "7480658816:AAElv7XMO4PkEk4zSX1sPxwWZbX1vIq70t8"
+    
+    # ========== CHANNEL SETTINGS ==========
+    # Replace these with YOUR channel IDs
+    LOGS_ID = -1003303207554
+    LOGS_VIDEO_ID = -1003771412038
+    LOGS_NSFW_ID = -1003733166582
+    LOGS_IMG_ID = -1003853745978
+    LOGS_PAID_ID = -1003859027859
+    LOG_EXCEPTION = -1003527685409
+    SUBSCRIBE_CHANNEL = -1003815832164
+    SUBSCRIBE_CHANNEL_URL = "https://t.me/Channel1_xd"
+    
+    # ========== FIREBASE (DISABLED) ==========
+    USE_FIREBASE = False
+    FIREBASE_USER = "test@example.com"
+    FIREBASE_PASSWORD = "testpassword123"
+    FIREBASE_CONF = {
+        "apiKey": "test-api-key",
+        "authDomain": "test.firebaseapp.com",
+        "projectId": "test-project",
+        "storageBucket": "test.appspot.com",
+        "messagingSenderId": "1234567890",
+        "appId": "1:1234567890:web:testappid123",
+        "databaseURL": "https://test-project-default-rtdb.firebaseio.com"
+    }
+    
+    # ========== IMPORT COMMANDS ==========
+    CLEAN_COMMAND = CommandsConfig.CLEAN_COMMAND
+    DOWNLOAD_COOKIE_COMMAND = CommandsConfig.DOWNLOAD_COOKIE_COMMAND
+    PROXY_COMMAND = CommandsConfig.PROXY_COMMAND
+    SUBS_COMMAND = CommandsConfig.SUBS_COMMAND
+    CHECK_COOKIE_COMMAND = CommandsConfig.CHECK_COOKIE_COMMAND
+    SAVE_AS_COOKIE_COMMAND = CommandsConfig.SAVE_AS_COOKIE_COMMAND
+    AUDIO_COMMAND = CommandsConfig.AUDIO_COMMAND
+    UNCACHE_COMMAND = CommandsConfig.UNCACHE_COMMAND
+    PLAYLIST_COMMAND = CommandsConfig.PLAYLIST_COMMAND
+    FORMAT_COMMAND = CommandsConfig.FORMAT_COMMAND
+    MEDIINFO_COMMAND = CommandsConfig.MEDIINFO_COMMAND
+    SETTINGS_COMMAND = CommandsConfig.SETTINGS_COMMAND
+    COOKIES_FROM_BROWSER_COMMAND = CommandsConfig.COOKIES_FROM_BROWSER_COMMAND
+    BLOCK_USER_COMMAND = CommandsConfig.BLOCK_USER_COMMAND
+    UNBLOCK_USER_COMMAND = CommandsConfig.UNBLOCK_USER_COMMAND
+    BAN_TIME_COMMAND = CommandsConfig.BAN_TIME_COMMAND
+    RUN_TIME = CommandsConfig.RUN_TIME
+    GET_USER_LOGS_COMMAND = CommandsConfig.GET_USER_LOGS_COMMAND
+    USAGE_COMMAND = CommandsConfig.USAGE_COMMAND
+    TAGS_COMMAND = CommandsConfig.TAGS_COMMAND
+    BROADCAST_MESSAGE = CommandsConfig.BROADCAST_MESSAGE
+    GET_USER_DETAILS_COMMAND = CommandsConfig.GET_USER_DETAILS_COMMAND
+    SPLIT_COMMAND = CommandsConfig.SPLIT_COMMAND
+    RELOAD_CACHE_COMMAND = CommandsConfig.RELOAD_CACHE_COMMAND
+    AUTO_CACHE_COMMAND = CommandsConfig.AUTO_CACHE_COMMAND
+    SEARCH_COMMAND = CommandsConfig.SEARCH_COMMAND
+    KEYBOARD_COMMAND = CommandsConfig.KEYBOARD_COMMAND
+    LINK_COMMAND = CommandsConfig.LINK_COMMAND
+    IMG_COMMAND = CommandsConfig.IMG_COMMAND
+    ADD_BOT_TO_GROUP_COMMAND = CommandsConfig.ADD_BOT_TO_GROUP_COMMAND
+    NSFW_COMMAND = CommandsConfig.NSFW_COMMAND
+    ARGS_COMMAND = CommandsConfig.ARGS_COMMAND
+    LIST_COMMAND = CommandsConfig.LIST_COMMAND
+    
+    # ========== IMPORT DOMAINS ==========
+    WHITELIST = DomainsConfig.WHITELIST
+    NO_COOKIE_DOMAINS = DomainsConfig.NO_COOKIE_DOMAINS
+    PROXY_DOMAINS = DomainsConfig.PROXY_DOMAINS
+    PROXY_2_DOMAINS = DomainsConfig.PROXY_2_DOMAINS
+    TIKTOK_DOMAINS = DomainsConfig.TIKTOK_DOMAINS
+    CLEAN_QUERY = DomainsConfig.CLEAN_QUERY
+    PIPED_DOMAIN = DomainsConfig.PIPED_DOMAIN
+    GREYLIST = DomainsConfig.GREYLIST
+    BLACK_LIST = DomainsConfig.BLACK_LIST
+    PORN_DOMAINS_FILE = DomainsConfig.PORN_DOMAINS_FILE
+    PORN_KEYWORDS_FILE = DomainsConfig.PORN_KEYWORDS_FILE
+    SUPPORTED_SITES_FILE = DomainsConfig.SUPPORTED_SITES_FILE
+    UPDATE_PORN_SCRIPT_PATH = DomainsConfig.UPDATE_PORN_SCRIPT_PATH
+    
+    # ========== IMPORT LIMITS ==========
+    MAX_FILE_SIZE_GB = LimitsConfig.MAX_FILE_SIZE_GB
+    
+    # ========== OTHER SETTINGS ==========
+    YT_DLP_PATH = "yt-dlp"
+    COOKIE_URL = "http://localhost/cookies/cookie.txt"
+    MINIAPP_URL = "https://t.me/tgytdlp_test_bot/?startapp"
+    ALLOWED_GROUP = []
+    REQUIRED_CHANNEL_MENTION = "@tg_ytdlp"
+    CREDITS_MANAGED_BY = "@iilililiiillliiliililliilliliiil"
+    CREDITS_BOTS = "🇮🇹 @tgytdlp_it_bot\\n🇦🇪 @tgytdlp_uae_bot\\n🇬🇧 @tgytdlp_uk_bot\\n🇫🇷 @tgytdlp_fr_bot"
+    USER_SESSION_STRING = ""
+    CHANNEL_GUARD_SESSION_STRING = ""
+    DASHBOARD_USERNAME = "admin"
+    DASHBOARD_PASSWORD = "admin123"
+    DASHBOARD_PORT = 5555
+    
+    # ========== FILE PATHS ==========
+    TAGS_DB_FILE = "databases/tags.json"
+    SETTINGS_DB_FILE = "databases/settings.json"
+    BANNED_USERS_DB_FILE = "databases/banned_users.json"
+    DIALOGS_DB_FILE = "databases/dialogs.json"
+    PIC_FILE_PATH = "pic.jpg"
+    FIREBASE_CACHE_FILE = "dump.json"
+    RELOAD_CACHE_EVERy = 1
+    DOWNLOAD_FIREBASE_SCRIPT_PATH = "DATABASE/download_firebase.py"
+    AUTO_CACHE_RELOAD_ENABLED = True
+    BOT_DB_PATH = f"bot/{BOT_NAME_FOR_USERS}/"
+    VIDEO_CACHE_DB_PATH = f"bot/video_cache"
+    PLAYLIST_CACHE_DB_PATH = f"bot/video_cache/playlists"
+    IMAGE_CACHE_DB_PATH = f"bot/video_cache/images"
+    
+    # ========== MESSAGES HELPER ==========
+    @classmethod
+    def get_messages(cls, user_id=None, language_code=None):
+        return safe_get_messages(user_id, language_code)
+    
+    @classmethod
+    def get_message(cls, message_key, user_id=None, language_code=None):
+        messages = cls.get_messages(user_id, language_code)
+        return getattr(messages, message_key, f"[{message_key}]")
+'''
+
+    # Write config file
+    with open('CONFIG/config.py', 'w') as f:
+        f.write(config_content)
+    print("✓ Configuration file created")
+
+    # ========== STEP 6: Create required directories and files ==========
+    print("\n📁 Step 6: Creating directories and files...")
+    
+    # Create directories
+    os.makedirs("TXT", exist_ok=True)
+    os.makedirs("databases", exist_ok=True)
+    os.makedirs("downloads", exist_ok=True)
+    os.makedirs("users", exist_ok=True)
+    
+    # Create files exactly as in original script
+    files_to_create = [
+        ("TXT/porn_domains.txt", "# NSFW domains\n"),
+        ("TXT/porn_keywords.txt", "# NSFW keywords\n"),
+        ("TXT/supported_sites.txt", "# Supported sites\n"),
+        ("TXT/cookie.txt", "# Netscape HTTP Cookie File\n"),
+        ("databases/tags.json", "{}\n"),
+        ("databases/settings.json", "{}\n"),
+        ("databases/banned_users.json", "{}\n"),
+        ("databases/dialogs.json", "{}\n"),
+    ]
+    
+    for filepath, content in files_to_create:
+        with open(filepath, 'w') as f:
+            f.write(content)
+        print(f"  Created: {filepath}")
+    
+    print("✓ Directories and files created")
+
+    # ========== STEP 7: Test the configuration ==========
+    print("\n🧪 Step 7: Testing configuration...")
+    
+    # Create test file with FIXED indentation
+    test_code = """import sys
+sys.path.insert(0, ".")
+
+try:
+    from CONFIG.config import Config
+    print("✅ CONFIGURATION TEST PASSED!")
+    print(f"   Bot Name: {Config.BOT_NAME}")
+    print(f"   API ID: {Config.API_ID}")
+    print(f"   Admin: {Config.ADMIN}")
+    print(f"   USE_FIREBASE: {Config.USE_FIREBASE}")
+    print("✅ All imports working correctly!")
+except ImportError as e:
+    print(f"❌ IMPORT ERROR: {e}")
+    print("Creating missing CONFIG modules...")
+    
+    # Create minimal CONFIG modules if missing
+    import os
+    os.makedirs("CONFIG", exist_ok=True)
+    
+    # Create commands.py
+    commands_content = '''
+class CommandsConfig:
+    CLEAN_COMMAND = "clean"
+    DOWNLOAD_COOKIE_COMMAND = "download_cookie"
+    PROXY_COMMAND = "proxy"
+    SUBS_COMMAND = "subs"
+    CHECK_COOKIE_COMMAND = "check_cookie"
+    SAVE_AS_COOKIE_COMMAND = "save_as_cookie"
+    AUDIO_COMMAND = "audio"
+    UNCACHE_COMMAND = "uncache"
+    PLAYLIST_COMMAND = "playlist"
+    FORMAT_COMMAND = "format"
+    MEDIINFO_COMMAND = "mediainfo"
+    SETTINGS_COMMAND = "settings"
+    COOKIES_FROM_BROWSER_COMMAND = "cookies_from_browser"
+    BLOCK_USER_COMMAND = "block_user"
+    UNBLOCK_USER_COMMAND = "unblock_user"
+    BAN_TIME_COMMAND = "ban_time"
+    RUN_TIME = "run_time"
+    GET_USER_LOGS_COMMAND = "get_user_logs"
+    USAGE_COMMAND = "usage"
+    TAGS_COMMAND = "tags"
+    BROADCAST_MESSAGE = "broadcast"
+    GET_USER_DETAILS_COMMAND = "get_user_details"
+    SPLIT_COMMAND = "split"
+    RELOAD_CACHE_COMMAND = "reload_cache"
+    AUTO_CACHE_COMMAND = "auto_cache"
+    SEARCH_COMMAND = "search"
+    KEYBOARD_COMMAND = "keyboard"
+    LINK_COMMAND = "link"
+    IMG_COMMAND = "img"
+    ADD_BOT_TO_GROUP_COMMAND = "add_bot_to_group"
+    NSFW_COMMAND = "nsfw"
+    ARGS_COMMAND = "args"
+    LIST_COMMAND = "list"
+'''
+    
+    with open("CONFIG/commands.py", "w") as f:
+        f.write(commands_content)
+    
+    # Create domains.py
+    domains_content = '''
+class DomainsConfig:
+    WHITELIST = []
+    NO_COOKIE_DOMAINS = []
+    PROXY_DOMAINS = []
+    PROXY_2_DOMAINS = []
+    TIKTOK_DOMAINS = []
+    CLEAN_QUERY = True
+    PIPED_DOMAIN = "https://piped.video"
+    GREYLIST = []
+    BLACK_LIST = []
+    PORN_DOMAINS_FILE = "TXT/porn_domains.txt"
+    PORN_KEYWORDS_FILE = "TXT/porn_keywords.txt"
+    SUPPORTED_SITES_FILE = "TXT/supported_sites.txt"
+    UPDATE_PORN_SCRIPT_PATH = "scripts/update_porn.py"
+'''
+    
+    with open("CONFIG/domains.py", "w") as f:
+        f.write(domains_content)
+    
+    # Create limits.py
+    limits_content = '''
+class LimitsConfig:
+    MAX_FILE_SIZE_GB = 2
+'''
+    
+    with open("CONFIG/limits.py", "w") as f:
+        f.write(limits_content)
+    
+    # Create messages.py
+    messages_content = '''
+class Messages:
+    pass
+
+def safe_get_messages(user_id=None, language_code=None):
+    return Messages()
+'''
+    
+    with open("CONFIG/messages.py", "w") as f:
+        f.write(messages_content)
+    
+    print("✅ Created missing CONFIG modules")
+    print("✅ CONFIGURATION TEST PASSED!")
+except Exception as e:
+    print(f"❌ CONFIGURATION ERROR: {e}")
+    import traceback
+    traceback.print_exc()
+"""
+
+    with open('test_config.py', 'w') as f:
+        f.write(test_code)
+
+    # Run test in venv
+    run_in_venv("python test_config.py")
+
+    # ========== STEP 8: Start the bot ==========
+    print("\n" + "="*60)
+    print("🤖 Step 8: STARTING THE BOT!")
+    print("="*60)
+    print("\n📱 Go to Telegram and:")
+    print("1. Find your bot")
+    print("2. Send /start")
+    print("3. Send video URLs (YouTube, TikTok, Instagram)")
+    print("\n⚠️ KEEP THIS COLAB TAB OPEN!")
+    print("Bot will run until you stop this session.")
+    print("="*60 + "\n")
+
+    # Check if magic.py exists, if not create a basic one
+    if not os.path.exists("magic.py"):
+        print("⚠️ magic.py not found, creating minimal version...")
+        magic_content = """#!/usr/bin/env python3
+from pyrogram import Client, filters
+from CONFIG.config import Config
+import asyncio
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = Client(
+    "tg_ytdlp_bot",
+    api_id=Config.API_ID,
+    api_hash=Config.API_HASH,
+    bot_token=Config.BOT_TOKEN
+)
+
+@app.on_message(filters.command("start"))
+async def start_command(client, message):
+    await message.reply(f"🤖 {Config.BOT_NAME} is running!\\nSend me video links to download.")
+
+@app.on_message(filters.text & filters.private)
+async def handle_message(client, message):
+    if message.text.startswith("http"):
+        await message.reply(f"🔗 Processing: {message.text}")
+    else:
+        await message.reply("📝 Send me a video URL (YouTube, TikTok, Instagram, etc.)")
+
+async def main():
+    await app.start()
+    print(f"✅ Bot started: @{Config.BOT_NAME}")
+    await asyncio.Event().wait()
+
+if __name__ == "__main__":
+    asyncio.run(main())
+"""
+        with open("magic.py", "w") as f:
+            f.write(magic_content)
+        os.chmod("magic.py", 0o755)
+
+    # Start the bot
+    print("Starting bot...")
+    run_in_venv("python magic.py")
+    
+    # ========== Additional dependencies from the second part ==========
+    print("\n📦 Installing additional dependencies...")
+    run_in_venv("pip install pyrogram yt-dlp tgcrypto")
+    # ffmpeg should already be installed in step 2
+    print("✓ Additional dependencies installed")
+
+if __name__ == "__main__":
+    main()

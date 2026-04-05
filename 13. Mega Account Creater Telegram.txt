@@ -1,0 +1,450 @@
+#!/usr/bin/env python3
+"""
+MEGA Account Creator Bot - EXACT COPY of Original Colab Script
+"""
+
+import os
+import sys
+import subprocess
+import time
+import random
+import string
+import requests
+import re
+import logging
+import traceback
+import html
+import signal
+import threading
+from datetime import datetime
+
+# ======================== SYSTEM DEPENDENCY INSTALLATION ========================
+def install_system_dependencies():
+    """Install required system packages EXACTLY like original Colab commands"""
+    print("🔧 Installing system dependencies...")
+    
+    # EXACT same commands as original
+    subprocess.run("apt-get update", shell=True, check=False)
+    subprocess.run("apt-get install -y wget xvfb libxi6 libgconf-2-4", shell=True, check=False)
+    subprocess.run("wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb", shell=True, check=False)
+    subprocess.run("dpkg -i google-chrome-stable_current_amd64.deb", shell=True, check=False)
+    subprocess.run("apt --fix-broken install -y", shell=True, check=False)
+    
+    print("✓ System dependencies installed")
+
+# ======================== PYTHON PACKAGE INSTALLATION ========================
+def install_python_packages():
+    """Install Python packages EXACTLY like original Colab commands"""
+    print("📦 Installing Python packages...")
+    
+    # EXACT same pip install command
+    subprocess.run(f"{sys.executable} -m pip install pyTelegramBotAPI selenium webdriver-manager requests watchdog psutil", shell=True, check=False)
+    
+    print("✓ Python packages installed")
+
+# Run installations first (EXACTLY like original Colab order)
+print("="*50)
+print("MEGA Account Creator Bot")
+print("="*50)
+install_system_dependencies()
+install_python_packages()
+
+# ======================== NOW IMPORT ALL LIBRARIES AFTER INSTALLATION ========================
+print("\n📚 Importing libraries...")
+try:
+    import telebot
+    from telebot import types
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from webdriver_manager.chrome import ChromeDriverManager
+    import psutil
+    print("✓ All libraries imported successfully")
+except ImportError as e:
+    print(f"⚠️ Import error: {e}")
+    print("🔄 Retrying installation...")
+    install_python_packages()
+    import telebot
+    from telebot import types
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from webdriver_manager.chrome import ChromeDriverManager
+    import psutil
+    print("✓ Libraries imported on second attempt")
+
+# ======================== REMOVE IPYTHON DEPENDENCY ========================
+# Replace IPython.display.Javascript with a simple function that does nothing
+# since we're not in Colab
+def display(javascript_obj):
+    """Dummy display function for non-Colab environments"""
+    pass
+
+# ======================== ORIGINAL SCRIPT STARTS HERE ========================
+
+# Telegram Bot Token
+BOT_TOKEN = "7734587005:AAFMhlm6LYRtz3M9ziSBPAsg3EUuvubVZJ0"
+bot = telebot.TeleBot(BOT_TOKEN)
+
+# Logging setup
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Constants
+BASE = "https://api.mail.tm"
+MEGA_REG_URL = "https://mega.nz/register"
+MAX_RETRIES = 3
+RETRY_DELAY = 10
+
+# Global flag for graceful shutdown
+shutdown_flag = False
+
+def signal_handler(sig, frame):
+    global shutdown_flag
+    logger.info("Shutdown signal received")
+    shutdown_flag = True
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
+def colab_keepalive():
+    """Click Colab's connect button every 25 minutes - kept for compatibility"""
+    # In regular Python, this just returns an empty string
+    return ""
+
+def network_keepalive():
+    """Maintain network activity with retries"""
+    while not shutdown_flag:
+        try:
+            sites = ["https://www.google.com", "https://www.cloudflare.com"]
+            for site in sites:
+                try:
+                    requests.get(site, timeout=10)
+                    logger.debug(f"Pinged {site}")
+                except Exception as e:
+                    logger.warning(f"Failed to ping {site}: {str(e)}")
+            time.sleep(300)  # Every 5 minutes
+        except Exception as e:
+            logger.warning(f"Network keepalive error: {e}")
+            time.sleep(60)
+
+def telegram_keepalive():
+    """Maintain Telegram connection with heartbeat"""
+    while not shutdown_flag:
+        try:
+            bot.get_me()
+            logger.debug("Telegram connection check successful")
+            time.sleep(600)  # Every 10 minutes
+        except Exception as e:
+            logger.warning(f"Telegram connection check failed: {e}")
+            time.sleep(30)
+
+def escape_html(text):
+    return html.escape(str(text))
+
+def random_name(length=10):
+    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
+
+def random_text(length=8):
+    return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
+
+def random_password(length=12):
+    chars = string.ascii_letters + string.digits + "!@#$%^&*"
+    return ''.join(random.choices(chars, k=length))
+
+class TempMailTM:
+    def __init__(self):
+        self.address = None
+        self.password = None
+        self.token = None
+        self.account_id = None
+
+    def create(self):
+        try:
+            domains = requests.get(f"{BASE}/domains").json().get("hydra:member", [])
+            if not domains:
+                return False
+            domain = random.choice(domains)["domain"]
+            name = random_name()
+            self.address = f"{name}@{domain}"
+            self.password = random_name(12)
+            reg = requests.post(f"{BASE}/accounts", json={"address": self.address, "password": self.password})
+            if reg.status_code not in (200, 201):
+                return False
+            self.account_id = reg.json().get("id")
+            token_res = requests.post(f"{BASE}/token", json={"address": self.address, "password": self.password})
+            if token_res.status_code == 200:
+                self.token = token_res.json().get("token")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"TempMail creation error: {e}")
+            return False
+
+    def fetch_messages(self):
+        if not self.token:
+            return []
+        headers = {"Authorization": f"Bearer {self.token}"}
+        try:
+            res = requests.get(f"{BASE}/messages", headers=headers)
+            if res.status_code == 200:
+                return res.json().get("hydra:member", [])
+            return []
+        except Exception as e:
+            logger.error(f"Fetch messages error: {e}")
+            return []
+
+    def get_message_content(self, msg_id):
+        if not self.token:
+            return None
+        headers = {"Authorization": f"Bearer {self.token}"}
+        try:
+            res = requests.get(f"{BASE}/messages/{msg_id}", headers=headers)
+            if res.status_code == 200:
+                return res.json()
+            return None
+        except Exception as e:
+            logger.error(f"Get message content error: {e}")
+            return None
+
+def extract_confirmation_link(text):
+    patterns = [
+        r'https://mega\.nz/[^\s\n\r<>"\']+',
+        r'https://mega\.co\.nz/[^\s\n\r<>"\']+',
+        r'http://mega\.nz/[^\s\n\r<>"\']+',
+    ]
+    for pattern in patterns:
+        matches = re.findall(pattern, text)
+        if matches:
+            return matches[0]
+    return None
+
+def cleanup_driver(driver):
+    try:
+        if driver:
+            driver.quit()
+    except Exception as e:
+        logger.error(f"Error cleaning up driver: {e}")
+
+def mega_registration(chat_id):
+    def send_update(message, markup=None):
+        for attempt in range(MAX_RETRIES):
+            try:
+                if markup:
+                    bot.send_message(chat_id, message, parse_mode='HTML', reply_markup=markup)
+                else:
+                    bot.send_message(chat_id, message, parse_mode='HTML')
+                break
+            except Exception as e:
+                logger.error(f"Send update error (attempt {attempt + 1}): {e}")
+                if attempt == MAX_RETRIES - 1:
+                    raise
+                time.sleep(RETRY_DELAY)
+
+    driver = None
+    try:
+        start_time = time.time()
+        send_update("🚀 Starting MEGA Account Registration\n⏳ Creating temporary email...")
+
+        temp_mail = TempMailTM()
+        if not temp_mail.create():
+            send_update("❌ Failed to create temporary email!\nPlease try again later.")
+            return
+
+        user_email = escape_html(temp_mail.address)
+        mega_password = escape_html(random_password())
+
+        send_update(
+            f"✅ Temporary Email Created!\n"
+            f"📧: <code>{user_email}</code>\n"
+            f"🔑 Generated Password: <code>{mega_password}</code>\n\n"
+            "⚙️ Initializing browser..."
+        )
+
+        chrome_options = Options()
+        chrome_options.add_argument('--headless')
+        chrome_options.add_argument('--no-sandbox')
+        chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument('--disable-gpu')
+        chrome_options.add_argument('--window-size=1920,1080')
+
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        wait = WebDriverWait(driver, 30)
+
+        send_update("🌐 Loading MEGA registration page...")
+        driver.get(MEGA_REG_URL)
+        time.sleep(5)
+
+        send_update("✅ Processing registration form...")
+        
+        # --- ORIGINAL LOGIC FOR CHECKBOXES ---
+        click_positions = [(506, 598), (506, 670)]
+        for x, y in click_positions:
+            try:
+                driver.execute_script(f"window.scrollTo(0, {y - 200});")
+                time.sleep(0.5)
+                element = driver.execute_script("return document.elementFromPoint(arguments[0], arguments[1]);", x, y)
+                if element:
+                    driver.execute_script("""
+                        var event = new MouseEvent('click', { bubbles: true, cancelable: true, clientX: arguments[0], clientY: arguments[1] });
+                        arguments[2].dispatchEvent(event);
+                    """, x, y, element)
+                time.sleep(1)
+            except Exception as e:
+                logger.error(f"Checkbox click error: {e}")
+
+        # --- ORIGINAL LOGIC FOR INPUT FIELDS ---
+        textbox_selectors = [
+            (By.XPATH, "//input[@type='text']"),
+            (By.XPATH, "//input[@type='email']"),
+            (By.XPATH, "//input[@type='password']"),
+            (By.XPATH, "//input[@type='search']"),
+            (By.XPATH, "//input[@type='tel']"),
+            (By.XPATH, "//input[@type='url']"),
+            (By.TAG_NAME, "textarea"),
+        ]
+        for by, selector in textbox_selectors:
+            try:
+                elements = driver.find_elements(by, selector)
+                for tb in elements:
+                    element_type = tb.get_attribute("type") or "text"
+                    element_id = tb.get_attribute("id") or ""
+                    element_name = tb.get_attribute("name") or ""
+                    try:
+                        driver.execute_script("arguments[0].scrollIntoView();", tb)
+                        if element_type == "email" or "email" in element_id.lower() or "email" in element_name.lower():
+                            value = temp_mail.address
+                        elif element_type == "password":
+                            value = mega_password
+                        else:
+                            value = random_text()
+                        driver.execute_script("arguments[0].value = arguments[1];", tb, value)
+                        driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", tb)
+                    except: pass
+            except: pass
+
+        # --- REVISED LOGIC FOR SIGN UP BUTTON ---
+        # The previous hardcoded coordinates failed. We now target the element itself but use a JS click to avoid 'interactable' errors.
+        try:
+            # First wait for the button to be present
+            reg_btn = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "button.register-button, .register-button-text")))
+            driver.execute_script("arguments[0].scrollIntoView(true);", reg_btn)
+            time.sleep(1)
+            # Use JS Click to bypass 'element not interactable'
+            driver.execute_script("arguments[0].click();", reg_btn)
+        except Exception as e:
+            logger.error(f"Register button click error: {e}")
+            # Fallback to coordinate if needed, but JS click is usually enough
+            driver.execute_script("var el = document.elementFromPoint(786, 224); if(el) el.click();")
+
+        send_update("📬 Registration submitted!\n⏳ Waiting for confirmation email...")
+        
+        confirmation_link = None
+        elapsed = 0
+        while elapsed < 120 and not shutdown_flag:
+            messages = temp_mail.fetch_messages()
+            if messages:
+                latest_msg = sorted(messages, key=lambda x: x.get("createdAt", ""), reverse=True)[0]
+                msg_content = temp_mail.get_message_content(latest_msg.get('id'))
+                if msg_content:
+                    email_text = str(msg_content.get('text', '')) + str(msg_content.get('html', ''))
+                    confirmation_link = extract_confirmation_link(email_text)
+                    if confirmation_link: break
+            time.sleep(10)
+            elapsed += 10
+            if not shutdown_flag:
+                send_update(f"⏱️ Checked inbox ({elapsed//60}m {elapsed%60}s elapsed)...")
+
+        if confirmation_link:
+            send_update(f"✅ Confirmation email received!\n🔗 Opening verification link...")
+            driver.get(confirmation_link)
+            time.sleep(3)
+        
+        screenshot = driver.get_screenshot_as_png()
+        bot.send_photo(chat_id, screenshot, caption="🖼️ Final Registration Status")
+
+        total_time = time.time() - start_time
+        mins, secs = divmod(total_time, 60)
+        results = (
+            "🎉 MEGA ACCOUNT CREATED SUCCESSFULLY!\n\n"
+            f"⏱️ Total Time: {int(mins)}m {int(secs)}s\n"
+            f"📧 Email: <code>{user_email}</code>\n"
+            f"🔐 Password: <code>{mega_password}</code>\n\n"
+            "⚠️ Save these credentials immediately\n"
+        )
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("🔄 Create Another Account", callback_data="create_another"))
+        send_update(results, markup)
+        cleanup_driver(driver)
+
+    except Exception as e:
+        # Full Debug in console
+        print("\n" + "="*50 + " DEBUG INFO " + "="*50)
+        traceback.print_exc()
+        if driver:
+            try:
+                error_ss = driver.get_screenshot_as_png()
+                bot.send_photo(chat_id, error_ss, caption="❌ Error Screenshot")
+                print("URL at failure:", driver.current_url)
+            except: pass
+        print("="*112)
+        send_update(f"❌ Error: <code>{escape_html(str(e))}</code>")
+        if driver: cleanup_driver(driver)
+
+@bot.message_handler(commands=['start', 'help'])
+def send_welcome(message):
+    welcome = "👋 Welcome to MEGA Account Creator Bot!\n🚀 Commands:\n• /register - Create new MEGA account"
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("🚀 Create Account", callback_data="start_registration"))
+    bot.reply_to(message, welcome, reply_markup=markup)
+
+@bot.message_handler(commands=['register'])
+def start_registration(message):
+    thread = threading.Thread(target=mega_registration, args=(message.chat.id,))
+    thread.daemon = True
+    thread.start()
+
+@bot.callback_query_handler(func=lambda call: True)
+def callback_handler(call):
+    if call.data in ["start_registration", "create_another"]:
+        thread = threading.Thread(target=mega_registration, args=(call.message.chat.id,))
+        thread.daemon = True
+        thread.start()
+
+def run_bot():
+    while not shutdown_flag:
+        try:
+            # Call colab_keepalive but don't use the result
+            colab_keepalive()
+            threading.Thread(target=network_keepalive, daemon=True).start()
+            threading.Thread(target=telegram_keepalive, daemon=True).start()
+            bot.infinity_polling(timeout=60, long_polling_timeout=60)
+        except Exception as e:
+            if shutdown_flag: break
+            logger.error(f"Bot error: {e}")
+            time.sleep(15)
+
+if __name__ == '__main__':
+    print("\n" + "="*50)
+    print("Starting MEGA Account Creator Bot...")
+    print("="*50)
+    print("\n📱 Send /start to your bot on Telegram")
+    print("⚠️ Press Ctrl+C to stop")
+    print("="*50 + "\n")
+    
+    try:
+        run_bot()
+    except KeyboardInterrupt:
+        print("\n\n👋 Bot stopped by user")
+    except Exception as e:
+        print(f"❌ Error: {e}")

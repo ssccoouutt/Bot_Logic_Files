@@ -1,0 +1,1515 @@
+# DEPENDENCIES - FIXED FFMPEG INSTALLATION
+print("🔧 Installing system dependencies...")
+
+# Install Python packages first
+import subprocess
+import sys
+import importlib.util
+
+def check_and_install_packages():
+    """Check and install required Python packages"""
+    required_packages = {
+        'requests': 'requests',
+        'selenium': 'selenium',
+        'webdriver-manager': 'webdriver-manager',
+        'Pillow': 'pillow',
+        'python-telegram-bot': 'python-telegram-bot',
+        'nest-asyncio': 'nest_asyncio',
+        'google-auth': 'google-auth',
+        'google-auth-oauthlib': 'google-auth-oauthlib',
+        'google-auth-httplib2': 'google-auth-httplib2',
+        'google-api-python-client': 'google-api-python-client',
+        'moviepy': 'moviepy',
+        'imageio': 'imageio',
+        'imageio-ffmpeg': 'imageio-ffmpeg',
+        'gdown': 'gdown',
+        'yt-dlp': 'yt-dlp',
+        'pickle-mixin': 'pickle-mixin'
+    }
+    
+    print("🐍 Installing Python packages...")
+    
+    for package_name, install_name in required_packages.items():
+        try:
+            # Try to import the package
+            spec = importlib.util.find_spec(package_name.replace('-', '_'))
+            if spec is None:
+                raise ImportError
+            print(f"✅ {package_name} is already installed")
+        except ImportError:
+            print(f"📦 Installing {package_name}...")
+            try:
+                subprocess.check_call([sys.executable, "-m", "pip", "install", install_name])
+                print(f"✅ Successfully installed {package_name}")
+            except:
+                print(f"⚠️ Failed to install {package_name}")
+    
+    print("✅ All Python packages installed and ready!")
+
+# Check and install packages
+check_and_install_packages()
+
+import os, time, re, logging, asyncio, requests, json, nest_asyncio, threading, random, string, tempfile, subprocess, shutil, inspect, sys, io, textwrap, pickle
+from datetime import datetime, timezone, timedelta
+from urllib.parse import unquote, urlparse, parse_qs
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler, CallbackQueryHandler
+import urllib3
+
+# Disable SSL warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+nest_asyncio.apply()
+
+# --- CONFIGURATION ---
+TOKEN = "8211223785:AAGJH6OPdbU6Qp3RJ9SfH1bZsZqCYK1lgbI"
+UPLOAD_TEMP_DIR = "upload_temp"
+COOKIE_FILE_URL = "https://drive.usercontent.google.com/download?id=1qSztyoQEUyIxja8Fe0ZY-DjZcQKsy63P&export=download"
+DRIVE_TOKEN_URL = "https://drive.usercontent.google.com/download?id=1NZ3NvyVBnK85S8f5eTZJS5uM5c59xvGM&export=download"
+LOGIC_IDS = {
+    'up4ever': "1gdb8siQTuHXG18ZVIf7CRsFB16989jYo",
+    'gdrive': "1V2BstTmfpb0AFzo5sEOmDd9Bw1Qk1Jot",
+    'watermark': "17vaWZactr9LTDYaqfLj1Ww3x0b6zGFWJ",
+    'edit': "1d_yTKHW7LeBx_toh-HY0Yl_-Djgm_c4s",
+    'extract': "1rgvehODlPWVQTQsWrwUbJaRzEG3JHb1Y",
+    'download': "1-LHxnHLA6osEnV2zqIOpFMH28JVrDaxa",
+    'jazzdrive': "18YJ1eFlnodIxn72YSQ_6PaLUmCZ2DQmu"  # New JazzDrive logic file
+}
+
+# Conversation states
+WAITING_FOR_GDRIVE_URL = 1
+WAITING_FOR_VIDEO_URL = 2
+WAITING_FOR_WATERMARK_TYPE = 3
+WAITING_FOR_LOGO_URL = 4
+WAITING_FOR_TEXT_WATERMARK = 5
+WAITING_FOR_EDIT_CHOICE = 6
+WAITING_FOR_VIDEO1_URL = 7
+WAITING_FOR_VIDEO2_URL = 8
+WAITING_FOR_START_TIME = 9
+WAITING_FOR_END_TIME = 10
+WAITING_FOR_TRIM_VIDEO_URL = 11
+WAITING_FOR_GDRIVE_LINK_EXTRACT = 12
+WAITING_FOR_DOWNLOAD_URL = 13
+# JazzDrive conversation states
+WAITING_FOR_JAZZDRIVE_URL = 14
+WAITING_FOR_JAZZ_PHONE = 15
+WAITING_FOR_JAZZ_OTP = 16
+
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Check FFmpeg installation
+def check_ffmpeg():
+    """Check if FFmpeg is installed and working"""
+    try:
+        result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True)
+        if result.returncode == 0:
+            logger.info("✅ FFmpeg is installed and working")
+            return True
+        else:
+            logger.error("❌ FFmpeg is not working properly")
+            return False
+    except Exception as e:
+        logger.error(f"❌ FFmpeg check failed: {e}")
+        return False
+
+# Run FFmpeg check
+if not check_ffmpeg():
+    print("⚠️ FFmpeg not found, attempting to install...")
+    # Try to install FFmpeg based on OS
+    if sys.platform == 'linux':
+        os.system("sudo apt-get update && sudo apt-get install -y ffmpeg")
+    elif sys.platform == 'darwin':  # macOS
+        os.system("brew install ffmpeg")
+    else:  # Windows
+        print("Please install FFmpeg from: https://ffmpeg.org/download.html")
+
+# --- UTILITY FUNCTIONS ---
+def download_and_parse_cookies():
+    try:
+        logger.info("[COOKIES] Downloading cookie file")
+        response = requests.get(COOKIE_FILE_URL, timeout=30)
+        response.raise_for_status()
+        cookies_dict = {}
+        for line in response.text.strip().split('\n'):
+            line = line.strip()
+            if not line or line.startswith('#'): continue
+            if '\t' in line:
+                parts = line.split('\t')
+                if len(parts) >= 7: cookies_dict[parts[5].strip()] = parts[6].strip()
+            elif '=' in line:
+                key_value = line.split('=', 1)
+                cookies_dict[key_value[0].strip()] = key_value[1].strip()
+        logger.info(f"[COOKIES] Parsed {len(cookies_dict)} cookies")
+        return cookies_dict
+    except Exception as e:
+        logger.error(f"[COOKIES] Error: {e}")
+        return {'login': 'itszeeshan196', 'xfss': '6mvck4snw8ykb730'}
+
+def download_drive_token():
+    try:
+        logger.info("[DRIVE] Downloading token")
+        token_response = requests.get(DRIVE_TOKEN_URL, stream=True, timeout=30)
+        token_response.raise_for_status()
+        token_data = token_response.json()
+        expiry_date = datetime.fromisoformat(token_data['expiry'].replace('Z', '+00:00'))
+        if datetime.now(timezone.utc) > expiry_date:
+            logger.info("[DRIVE] Refreshing token...")
+            refresh_data = {'client_id': token_data['client_id'], 'client_secret': token_data['client_secret'],
+                          'refresh_token': token_data['refresh_token'], 'grant_type': 'refresh_token'}
+            refresh_response = requests.post(token_data['token_uri'], data=refresh_data)
+            refresh_response.raise_for_status()
+            new_token = refresh_response.json()
+            token_data['token'] = new_token['access_token']
+            token_data['expiry'] = datetime.now(timezone.utc).isoformat()
+        return token_data, None
+    except Exception as e:
+        logger.error(f"[DRIVE] Error: {e}")
+        return None, None
+
+def get_drive_service():
+    token_data, _ = download_drive_token()
+    if not token_data: return None
+    from googleapiclient.discovery import build
+    from google.oauth2.credentials import Credentials
+    creds = Credentials(token=token_data['token'], refresh_token=token_data.get('refresh_token'),
+                       token_uri=token_data.get('token_uri'), client_id=token_data.get('client_id'),
+                       client_secret=token_data.get('client_secret'))
+    return build('drive', 'v3', credentials=creds)
+
+def download_from_drive_link(drive_url, output_path):
+    try:
+        service = get_drive_service()
+        if not service: return False
+        file_id = drive_url
+        if 'drive.google.com' in drive_url:
+            if '/file/d/' in drive_url: file_id = drive_url.split('/file/d/')[1].split('/')[0]
+            elif 'id=' in drive_url: file_id = parse_qs(urlparse(drive_url).query)['id'][0]
+        request = service.files().get_media(fileId=file_id)
+        with open(output_path, 'wb') as f: f.write(request.execute())
+        return True
+    except Exception as e:
+        logger.error(f"[DRIVE DOWNLOAD] Error: {e}")
+        return False
+
+def download_file_from_url(url, output_path):
+    try:
+        if 'drive.google.com' in url or (len(url) in [33, 19] and 'http' not in url):
+            return download_from_drive_link(url, output_path)
+        response = requests.get(url, stream=True, timeout=300)
+        response.raise_for_status()
+        with open(output_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192): f.write(chunk)
+        return True
+    except Exception as e:
+        logger.error(f"[DOWNLOAD] Error: {e}")
+        return False
+
+def upload_to_drive(file_path, chat_id):
+    try:
+        from googleapiclient.http import MediaFileUpload
+        from google.oauth2.credentials import Credentials
+        import json
+        # Get token
+        token_data, _ = download_drive_token()
+        if not token_data:
+            send_telegram_message(chat_id, "<b>❌ Failed to get Google Drive credentials</b>")
+            return None
+        creds = Credentials(token=token_data['token'])
+        service = get_drive_service()
+        if not service: return None
+        filename = os.path.basename(file_path)
+        send_telegram_message(chat_id, f"<b>☁️ Uploading {filename} to Google Drive...</b>")
+        media = MediaFileUpload(file_path, resumable=True)
+        file = service.files().create(
+            body={'name': filename},
+            media_body=media,
+            fields='id, name, webViewLink'
+        ).execute()
+        drive_url = f"https://drive.google.com/file/d/{file['id']}/view"
+        send_telegram_message(chat_id, f"<b>✅ Upload Complete!</b>\n🔗 {drive_url}")
+        return drive_url
+    except Exception as e:
+        logger.error(f"[DRIVE UPLOAD] Error: {e}")
+        send_telegram_message(chat_id, f"<b>❌ Upload Failed</b>\n{str(e)}")
+        return None
+
+def send_telegram_message(chat_id, text, bot_token=TOKEN):
+    try:
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+    except Exception as e: logger.error(f"Error sending message: {e}")
+
+# --- VIDEO UTILS ---
+def time_to_seconds(time_str):
+    try:
+        time_str = time_str.strip()
+        if 'to' in time_str: time_str = time_str.split('to')[0].strip()
+        parts = time_str.split(':')
+        if len(parts) == 3: return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+        elif len(parts) == 2: return int(parts[0]) * 60 + float(parts[1])
+        elif len(parts) == 1: return float(parts[0])
+        raise ValueError("Invalid time format")
+    except:
+        raise ValueError("Invalid time format")
+
+def get_video_duration(filename):
+    try:
+        cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', filename]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            return float(result.stdout.strip())
+        return 0.0
+    except:
+        return 0.0
+
+def get_video_resolution(filename):
+    try:
+        cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=s=x:p=0', filename]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            w, h = result.stdout.strip().split('x')
+            return int(w), int(h)
+        return 1920, 1080
+    except:
+        return 1920, 1080
+
+def has_audio_stream(filename):
+    try:
+        cmd = ['ffprobe', '-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', filename]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        return 'audio' in result.stdout
+    except:
+        return False
+
+def trim_video_fast(input_file, output_file, start_time, end_time=None):
+    duration = (end_time - start_time) if end_time else (get_video_duration(input_file) - start_time)
+    cmd = ['ffmpeg', '-ss', str(start_time), '-i', input_file, '-t', str(duration), '-c', 'copy', '-avoid_negative_ts', 'make_zero', '-y', output_file]
+    logger.info(f"Running FFmpeg command: {' '.join(cmd)}")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        logger.error(f"FFmpeg error: {result.stderr[:500]}")
+        raise subprocess.CalledProcessError(result.returncode, cmd)
+    return True
+
+def merge_two_videos(video1, video2, output_file):
+    concat_file = os.path.join(tempfile.gettempdir(), f"concat_{int(time.time())}.txt")
+    with open(concat_file, 'w') as f:
+        f.write(f"file '{os.path.abspath(video1)}'\nfile '{os.path.abspath(video2)}'\n")
+    # Try stream copy first
+    cmd = ['ffmpeg', '-f', 'concat', '-safe', '0', '-i', concat_file, '-c', 'copy', '-movflags', '+faststart', '-y', output_file]
+    logger.info(f"Running FFmpeg merge command: {' '.join(cmd)}")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        logger.warning("Stream copy failed, trying re-encoding...")
+        cmd = ['ffmpeg', '-f', 'concat', '-safe', '0', '-i', concat_file, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', '-y', output_file]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    if os.path.exists(concat_file):
+        os.remove(concat_file)
+    if result.returncode != 0:
+        logger.error(f"Merge failed: {result.stderr[:500]}")
+        raise subprocess.CalledProcessError(result.returncode, cmd)
+    return True
+
+# --- DYNAMIC LOGIC LOADING ---
+def run_logic(key, func, *args):
+    tmp = os.path.join(tempfile.gettempdir(), f"{func}.py")
+    if download_from_drive_link(LOGIC_IDS[key], tmp):
+        ns = {}
+        exec(open(tmp).read(), ns)
+        return ns[func](*args)
+
+# --- TASK WRAPPERS ---
+def task1_upload_to_up4ever(filepath, chat_id): run_logic('up4ever', 'task1_upload_to_up4ever', filepath, chat_id)
+def task2_upload_to_gdrive(file_url, chat_id): run_logic('gdrive', 'task2_upload_to_gdrive', file_url, chat_id)
+def task3_process_video(v_url, l_url, w_type, t_txt, chat_id): run_logic('watermark', 'task3_process_video', v_url, l_url, w_type, t_txt, chat_id)
+def task4_video_editing(chat_id, op, v1_url=None, v2_url=None, s=None, e=None, i_id=None): run_logic('edit', 'task4_video_editing', chat_id, op, v1_url, v2_url, s, e, i_id)
+def task5_extract_direct_link(url, chat_id): run_logic('extract', 'task5_extract_direct_link', url, chat_id)
+def task6_download_video(url, chat_id, context_data=None, callback_query=None): run_logic('download', 'task6_download_video', url, chat_id, context_data, callback_query)
+def task7_upload_to_jazzdrive(url, chat_id, context_data=None, callback_query=None): run_logic('jazzdrive', 'task7_upload_to_jazzdrive', url, chat_id, context_data, callback_query)
+
+# --- DOWNLOAD FUNCTION WRAPPERS ---
+def start_download_command(url, chat_id, context_data=None):
+    """Start a download command with session management"""
+    # If we have an existing manager, check if it's expired
+    if context_data and 'download_manager' in context_data:
+        manager = context_data['download_manager']
+        if manager.is_expired():
+            # Clear expired manager
+            context_data.pop('download_manager', None)
+        else:
+            # Update activity timestamp
+            manager.update_activity()
+    return task6_download_video(url, chat_id, context_data)
+
+def handle_download_callback(callback_data, callback_query_id, chat_id, message_id, context_data):
+    """Handle download callback"""
+    callback_query = {
+        'data': callback_data,
+        'id': callback_query_id
+    }
+    return task6_download_video(None, chat_id, context_data, callback_query)
+
+def refresh_download_session(chat_id, context):
+    """Refresh download session to prevent expiration"""
+    if 'download_manager' in context.user_data:
+        manager = context.user_data['download_manager']
+        manager.update_activity()
+        return True
+    return False
+
+# --- JAZZDRIVE FUNCTION WRAPPERS ---
+def start_jazzdrive_upload(url, chat_id, context_data=None):
+    """Start JazzDrive upload"""
+    return task7_upload_to_jazzdrive(url, chat_id, context_data)
+
+def handle_jazzdrive_callback(callback_data, callback_query_id, chat_id, message_id, context_data):
+    """Handle JazzDrive callback"""
+    callback_query = {
+        'data': callback_data,
+        'id': callback_query_id
+    }
+    return task7_upload_to_jazzdrive(None, chat_id, context_data, callback_query)
+
+def jazzdrive_login_setup(chat_id, context_data, phone=None, otp=None):
+    """Setup JazzDrive login"""
+    if phone:
+        context_data['jazz_phone'] = phone
+    if otp:
+        context_data['jazz_otp'] = otp
+    context_data['jazz_setup'] = True
+    return task7_upload_to_jazzdrive(None, chat_id, context_data)
+
+# --- FIXED CODE EXPORT ---
+async def code_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📦 <b>Exporting all code files...</b>", parse_mode='HTML')
+    try:
+        temp_dir = tempfile.gettempdir()
+        output_file = os.path.join(temp_dir, f"bot_code_export_{int(time.time())}.txt")
+        with open(output_file, 'w', encoding='utf-8') as f:
+            # Write MAIN SCRIPT
+            f.write("="*80 + "\nMAIN SCRIPT (bot_main.py)\n" + "="*80 + "\n\n")
+            # Get current script content
+            try:
+                # Create a summary of the script structure
+                f.write("# Main bot script running in Python environment\n")
+                f.write("# Contains all bot functionality with download feature\n")
+                f.write("# This file contains all the main bot logic and handlers\n")
+            except:
+                f.write("# Unable to extract full script content\n")
+                f.write("# This is the main bot script with download functionality\n")
+            # Download and write logic files from Google Drive
+            logic_files = [
+                ('up4ever.py', 'up4ever', 'Upload files to up-4ever.net'),
+                ('gdrive.py', 'gdrive', 'Google Drive upload operations'),
+                ('watermark.py', 'watermark', 'Video watermarking functions'),
+                ('edit.py', 'edit', 'Video editing (trim/merge) functions'),
+                ('extract.py', 'extract', 'Direct link extraction functions'),
+                ('download.py', 'download', 'Universal video downloader'),
+                ('jazzdrive.py', 'jazzdrive', 'JazzDrive upload functions')  # Added JazzDrive
+            ]
+            for filename, key, description in logic_files:
+                f.write(f"\n\n{'='*80}\n{filename} - {description}\n{'='*80}\n\n")
+                tmp_file = os.path.join(temp_dir, f"{key}_temp.py")
+                if download_from_drive_link(LOGIC_IDS[key], tmp_file):
+                    try:
+                        with open(tmp_file, 'r', encoding='utf-8') as logic_file:
+                            content = logic_file.read()
+                            f.write(content)
+                    except Exception as e:
+                        f.write(f"# Error reading {filename}: {str(e)}\n")
+                    finally:
+                        if os.path.exists(tmp_file):
+                            os.remove(tmp_file)
+                else:
+                    f.write(f"# Failed to download {filename} from Google Drive\n")
+                    f.write(f"# Google Drive ID: {LOGIC_IDS[key]}\n")
+            # Add metadata
+            f.write(f"\n\n{'='*80}\nMETADATA\n{'='*80}\n")
+            f.write(f"Export Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Environment: Python\n")
+            f.write(f"Bot Token: {TOKEN[:10]}...\n")
+            f.write(f"Logic Files: {len(logic_files)} modules\n")
+        # Send the file
+        with open(output_file, 'rb') as doc:
+            await context.bot.send_document(
+                chat_id=update.effective_chat.id,
+                document=doc,
+                filename=f"bot_code_export_{int(time.time())}.txt",
+                caption=f"📦 <b>All Code Files</b>\n\nGenerated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\nContains: Main script + {len(logic_files)} logic modules",
+                parse_mode='HTML'
+            )
+        # Clean up
+        if os.path.exists(output_file):
+            os.remove(output_file)
+        await update.message.reply_text("✅ <b>Code export completed!</b>", parse_mode='HTML')
+    except Exception as e:
+        logger.error(f"[CODE EXPORT] Error: {e}")
+        error_msg = str(e)[:500]
+        await update.message.reply_text(
+            f"❌ <b>Error exporting code:</b>\n<code>{error_msg}</code>",
+            parse_mode='HTML'
+        )
+
+# --- TELEGRAM HANDLERS ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    welcome_text = """
+🤖 <b>File Processing Bot</b>
+
+<b>Commands:</b>
+/upload - Upload to up-4ever.net
+/gdrive - Upload to Google Drive
+/video - Add watermarks to videos
+/edit - Trim/merge videos
+/extract - Get direct download links
+/download - Download from any website (YouTube, Instagram, etc.)
+/jazzdrive - Upload to JazzDrive (YouTube, direct links, Google Drive)
+/status - Check bot status
+/code - Export all code files
+
+<b>Note:</b> Send files or links to process them.
+    """
+    await update.message.reply_text(welcome_text, parse_mode='HTML')
+    context.user_data.clear()
+
+async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_cookies = download_and_parse_cookies()
+    account = user_cookies.get('login', 'unknown')
+    text = f"""
+📤 <b>Upload to up-4ever.net</b>
+
+👤 Account: {account}
+
+Send me a file or link to upload.
+    """
+    await update.message.reply_text(text, parse_mode='HTML')
+    context.user_data['task'] = 'upload'
+
+async def gdrive_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        """
+☁️ <b>Upload to Google Drive</b>
+
+Send me a direct download URL or Google Drive link.
+
+<i>Supported formats:</i>
+• Direct URLs (http/https)
+• Google Drive share links
+• Google Drive file IDs
+        """,
+        parse_mode='HTML'
+    )
+    return WAITING_FOR_GDRIVE_URL
+
+async def handle_gdrive_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = update.message.text.strip()
+    await update.message.reply_text("✅ <b>Uploading to Google Drive...</b>", parse_mode='HTML')
+    threading.Thread(target=task2_upload_to_gdrive, args=(url, update.effective_chat.id)).start()
+    return ConversationHandler.END
+
+async def extract_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        """
+🔗 <b>Extract Direct Link</b>
+
+Send me a Google Drive link to extract direct download link.
+
+<i>This will generate a direct download link that bypasses the Google Drive interface.</i>
+        """,
+        parse_mode='HTML'
+    )
+    return WAITING_FOR_GDRIVE_LINK_EXTRACT
+
+async def handle_extract_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = update.message.text.strip()
+    await update.message.reply_text("✅ <b>Extracting direct link...</b>", parse_mode='HTML')
+    threading.Thread(target=task5_extract_direct_link, args=(url, update.effective_chat.id)).start()
+    return ConversationHandler.END
+
+# --- DOWNLOAD COMMAND HANDLERS ---
+async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start download process"""
+    await update.message.reply_text(
+        """
+⬇️ <b>Universal Video Downloader</b>
+
+Send me a video URL from any supported website:
+
+<b>Supported Platforms:</b>
+• YouTube (youtube.com, youtu.be)
+• Instagram (instagram.com, instagr.am)
+• Twitter/X (twitter.com, x.com)
+• TikTok (tiktok.com)
+• Facebook (facebook.com)
+• Reddit (reddit.com)
+• Many more!
+
+<i>Enter video URL:</i>
+        """,
+        parse_mode='HTML'
+    )
+    return WAITING_FOR_DOWNLOAD_URL
+
+async def handle_download_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle download URL input"""
+    url = update.message.text.strip()
+    if not url.startswith(('http://', 'https://')):
+        await update.message.reply_text(
+            """
+❌ <b>Invalid URL!</b>
+
+Please enter a valid URL starting with http:// or https://
+            """,
+            parse_mode='HTML'
+        )
+        return WAITING_FOR_DOWNLOAD_URL
+    # Send initial message
+    status_msg = await update.message.reply_text(
+        f"""
+<b>🔍 Analyzing video...</b>
+
+<code>{url[:80]}...</code>
+
+<i>Fetching available formats...</i>
+        """,
+        parse_mode='HTML'
+    )
+    # Store URL in context for later use
+    context.user_data['download_url'] = url
+    # Start download process in background
+    def start_download():
+        result = start_download_command(url, update.effective_chat.id, context.user_data)
+        # Update status based on result
+        if result == "menu_sent":
+            # Send success message
+            send_telegram_message(update.effective_chat.id,
+                """
+<b>✅ Formats fetched successfully!</b>
+
+Check the message above for available formats.
+Click the buttons to select your preferred format.
+                """
+            )
+        elif result == "error":
+            send_telegram_message(update.effective_chat.id,
+                """
+<b>❌ Failed to fetch video formats.</b>
+
+Please check the URL and try again.
+Possible issues:
+• Video is private or age-restricted
+• URL is incorrect
+• Website not supported
+                """
+            )
+            # Clear download data on error
+            if 'download_url' in context.user_data:
+                context.user_data.pop('download_url')
+    # Run in thread to avoid blocking
+    threading.Thread(target=start_download).start()
+    # Edit the status message after a short delay
+    await asyncio.sleep(1)
+    await status_msg.edit_text(
+        """
+<b>⏳ Processing your request...</b>
+
+<i>Please wait while I fetch the available formats.</i>
+This usually takes 5-10 seconds.
+        """,
+        parse_mode='HTML'
+    )
+    return ConversationHandler.END
+
+# --- JAZZDRIVE COMMAND HANDLERS ---
+async def jazzdrive_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start JazzDrive upload process"""
+    await update.message.reply_text(
+        """
+☁️ <b>JazzDrive Upload</b>
+
+Send me a URL to upload to JazzDrive:
+
+<b>Supported:</b>
+• YouTube videos (with format selection)
+• Direct download links
+• Google Drive links
+• Other video platforms
+
+<i>Note: Requires JazzDrive login (sessions saved to Google Drive)</i>
+
+<b>Enter URL:</b>
+        """,
+        parse_mode='HTML'
+    )
+    return WAITING_FOR_JAZZDRIVE_URL
+
+async def handle_jazzdrive_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle JazzDrive URL input"""
+    url = update.message.text.strip()
+    if not url.startswith(('http://', 'https://')):
+        await update.message.reply_text(
+            """
+❌ <b>Invalid URL!</b>
+
+Please enter a valid URL starting with http:// or https://
+            """,
+            parse_mode='HTML'
+        )
+        return WAITING_FOR_JAZZDRIVE_URL
+    # Send initial message
+    status_msg = await update.message.reply_text(
+        f"""
+<b>🔍 Processing for JazzDrive...</b>
+
+<code>{url[:80]}...</code>
+
+<i>Checking JazzDrive session...</i>
+        """,
+        parse_mode='HTML'
+    )
+    # Store URL in context
+    context.user_data['jazzdrive_url'] = url
+    # Start JazzDrive process in background
+    def start_jazzdrive():
+        result = start_jazzdrive_upload(url, update.effective_chat.id, context.user_data)
+        # Handle different results
+        if result == "needs_login":
+            send_telegram_message(update.effective_chat.id,
+                """
+<b>🔐 JazzDrive Login Required</b>
+
+Please login with /jazzdrive_login command first.
+                """
+            )
+        elif result == "menu_sent":
+            send_telegram_message(update.effective_chat.id,
+                """
+<b>✅ Formats fetched for JazzDrive!</b>
+
+Check the message above for available formats.
+Click the buttons to select your preferred format.
+                """
+            )
+        elif result == "completed":
+            # Already handled in the logic file
+            pass
+        elif result == "error":
+            send_telegram_message(update.effective_chat.id,
+                """
+<b>❌ JazzDrive upload failed.</b>
+
+Please check the URL and try again.
+                """
+            )
+    # Run in thread to avoid blocking
+    threading.Thread(target=start_jazzdrive).start()
+    # Edit the status message after a short delay
+    await asyncio.sleep(1)
+    await status_msg.edit_text(
+        """
+<b>⏳ Processing your request...</b>
+
+<i>Please wait while I process for JazzDrive.</i>
+This may take a few moments...
+        """,
+        parse_mode='HTML'
+    )
+    return ConversationHandler.END
+
+async def jazzdrive_login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start JazzDrive login process"""
+    await update.message.reply_text(
+        """
+🔐 <b>JazzDrive Login</b>
+
+Please enter your Jazz mobile number (format: 03XXXXXXXXX):
+
+<i>Note: Sessions are saved to Google Drive for future use</i>
+        """,
+        parse_mode='HTML'
+    )
+    # Clear any existing login data
+    context.user_data.pop('jazz_phone', None)
+    context.user_data.pop('jazz_otp', None)
+    context.user_data.pop('jazz_setup', None)
+    return WAITING_FOR_JAZZ_PHONE
+
+async def handle_jazz_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle Jazz phone number input"""
+    phone = update.message.text.strip()
+    # Validate phone number format
+    if not re.match(r'^03\d{9}$', phone):
+        await update.message.reply_text(
+            """
+❌ <b>Invalid phone number format!</b>
+
+Please enter in 03XXXXXXXXX format (11 digits):
+<i>Example: 03123456789</i>
+            """,
+            parse_mode='HTML'
+        )
+        return WAITING_FOR_JAZZ_PHONE
+    # Store phone number
+    context.user_data['jazz_phone'] = phone
+    # Start login setup
+    await update.message.reply_text(
+        f"""
+📱 <b>Phone number received: {phone}</b>
+
+<i>Setting up JazzDrive login...</i>
+        """,
+        parse_mode='HTML'
+    )
+    # Start login process in background
+    def start_login():
+        result = jazzdrive_login_setup(update.effective_chat.id, context.user_data, phone=phone)
+        if result == "waiting_otp":
+            send_telegram_message(update.effective_chat.id,
+                """
+<b>📲 OTP Sent!</b>
+
+Please check your phone and enter the 4-digit OTP:
+                """
+            )
+        elif result == "logged_in":
+            # Already handled in logic file
+            pass
+        elif result == "error":
+            send_telegram_message(update.effective_chat.id,
+                """
+<b>❌ Login setup failed.</b>
+
+Please try /jazzdrive_login again.
+                """
+            )
+    threading.Thread(target=start_login).start()
+    return WAITING_FOR_JAZZ_OTP
+
+async def handle_jazz_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle Jazz OTP input"""
+    otp = update.message.text.strip()
+    # Validate OTP format
+    if not re.match(r'^\d{4}$', otp):
+        await update.message.reply_text(
+            """
+❌ <b>Invalid OTP format!</b>
+
+Please enter exactly 4 digits:
+            """,
+            parse_mode='HTML'
+        )
+        return WAITING_FOR_JAZZ_OTP
+    # Store OTP
+    context.user_data['jazz_otp'] = otp
+    # Process OTP
+    await update.message.reply_text(
+        f"""
+🔢 <b>OTP received: {otp}</b>
+
+<i>Completing JazzDrive login...</i>
+        """,
+        parse_mode='HTML'
+    )
+    # Complete login in background
+    def complete_login():
+        result = jazzdrive_login_setup(update.effective_chat.id, context.user_data, otp=otp)
+        if result == "logged_in":
+            # Already handled in logic file
+            pass
+        elif result == "error":
+            send_telegram_message(update.effective_chat.id,
+                """
+<b>❌ Login failed.</b>
+
+Invalid OTP or login error. Please try /jazzdrive_login again.
+                """
+            )
+    threading.Thread(target=complete_login).start()
+    return ConversationHandler.END
+
+async def video_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        """
+🎬 <b>Video Watermark</b>
+
+Send me the video URL.
+
+<i>Supported formats:</i>
+• Direct video URLs
+• Google Drive links
+• Other cloud storage links
+        """,
+        parse_mode='HTML'
+    )
+    return WAITING_FOR_VIDEO_URL
+
+async def handle_video_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['video_url'] = update.message.text.strip()
+    await update.message.reply_text(
+        """
+✅ <b>Choose watermark type:</b>
+
+1. <b>static</b> - Add a logo/image watermark
+2. <b>text</b> - Add text watermark
+3. <b>combined</b> - Add both logo and text
+
+Reply with: static, text, or combined
+        """,
+        parse_mode='HTML'
+    )
+    return WAITING_FOR_WATERMARK_TYPE
+
+async def handle_watermark_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    wm_type = update.message.text.strip().lower()
+    if wm_type not in ['static', 'text', 'combined']:
+        await update.message.reply_text(
+            """
+❌ <b>Invalid choice!</b>
+
+Please choose one of:
+• static
+• text
+• combined
+            """,
+            parse_mode='HTML'
+        )
+        return WAITING_FOR_WATERMARK_TYPE
+    context.user_data['watermark_type'] = wm_type
+    if wm_type in ['static', 'combined']:
+        await update.message.reply_text(
+            """
+✅ <b>Send logo URL:</b>
+
+<i>Provide a direct URL to your logo/image (PNG with transparency works best).</i>
+            """,
+            parse_mode='HTML'
+        )
+        return WAITING_FOR_LOGO_URL
+    else:
+        await update.message.reply_text(
+            """
+✅ <b>Send watermark text:</b>
+
+<i>Enter the text you want to overlay on the video.</i>
+            """,
+            parse_mode='HTML'
+        )
+        return WAITING_FOR_TEXT_WATERMARK
+
+async def handle_logo_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['logo_url'] = update.message.text.strip()
+    if context.user_data['watermark_type'] == 'combined':
+        await update.message.reply_text(
+            """
+✅ <b>Send watermark text:</b>
+
+<i>Enter the text you want to overlay along with the logo.</i>
+            """,
+            parse_mode='HTML'
+        )
+        return WAITING_FOR_TEXT_WATERMARK
+    await update.message.reply_text("✅ <b>Processing video with static watermark...</b>", parse_mode='HTML')
+    threading.Thread(
+        target=task3_process_video,
+        args=(
+            context.user_data['video_url'],
+            context.user_data['logo_url'],
+            'static',
+            '',
+            update.effective_chat.id
+        )
+    ).start()
+    return ConversationHandler.END
+
+async def handle_text_watermark(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    # Get parameters from context
+    video_url = context.user_data.get('video_url')
+    logo_url = context.user_data.get('logo_url', '')
+    wm_type = context.user_data.get('watermark_type', 'text')
+    await update.message.reply_text(f"✅ <b>Processing video with {wm_type} watermark...</b>", parse_mode='HTML')
+    threading.Thread(
+        target=task3_process_video,
+        args=(
+            video_url,
+            logo_url,
+            wm_type,
+            text,
+            update.effective_chat.id
+        )
+    ).start()
+    return ConversationHandler.END
+
+async def edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = """
+🎬 <b>Video Editing</b>
+
+<b>Available operations:</b>
+1. ✂️ Trim Video - Cut a portion of a video
+2. 🔗 Merge Videos - Combine two videos
+3. 🎞️ Trim & Merge with Intro - Trim video and add intro
+4. 🛠️ Custom Merge - Advanced video merging
+
+<b>Reply with number (1-4):</b>
+    """
+    await update.message.reply_text(text, parse_mode='HTML')
+    return WAITING_FOR_EDIT_CHOICE
+
+async def handle_edit_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    choice = update.message.text.strip()
+    if choice not in ['1', '2', '3', '4']:
+        await update.message.reply_text(
+            """
+❌ <b>Invalid choice!</b>
+
+Please reply with a number from 1 to 4.
+            """,
+            parse_mode='HTML'
+        )
+        return WAITING_FOR_EDIT_CHOICE
+    context.user_data['edit_choice'] = choice
+    if choice in ['1', '3']:
+        await update.message.reply_text(
+            """
+✂️ <b>Send video URL to trim:</b>
+
+<i>Provide the video link you want to trim.</i>
+            """,
+            parse_mode='HTML'
+        )
+        return WAITING_FOR_TRIM_VIDEO_URL
+    else:
+        await update.message.reply_text(
+            """
+🔗 <b>Send first video URL:</b>
+
+<i>Provide the first video for merging.</i>
+            """,
+            parse_mode='HTML'
+        )
+        return WAITING_FOR_VIDEO1_URL
+
+async def handle_trim_video_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['video_url'] = update.message.text.strip()
+    await update.message.reply_text(
+        """
+✅ <b>Send start time:</b>
+
+<i>Format examples:</i>
+• 1:30 (1 minute, 30 seconds)
+• 0:45.5 (45.5 seconds)
+• 2:15:30 (2 hours, 15 minutes, 30 seconds)
+        """,
+        parse_mode='HTML'
+    )
+    return WAITING_FOR_START_TIME
+
+async def handle_video1_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['video1_url'] = update.message.text.strip()
+    if context.user_data['edit_choice'] == '4':
+        await update.message.reply_text(
+            """
+🛠️ <b>Custom Merge Mode</b>
+
+Send second video URL:
+            """,
+            parse_mode='HTML'
+        )
+    else:
+        await update.message.reply_text(
+            """
+✅ <b>Send second video URL:</b>
+
+<i>Provide the second video for merging.</i>
+            """,
+            parse_mode='HTML'
+        )
+    return WAITING_FOR_VIDEO2_URL
+
+async def handle_video2_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = update.message.text.strip()
+    choice = context.user_data.get('edit_choice', '2')
+    if choice == '2':
+        await update.message.reply_text("✅ <b>Merging videos...</b>", parse_mode='HTML')
+        threading.Thread(
+            target=task4_video_editing,
+            args=(update.effective_chat.id, 'merge', context.user_data['video1_url'], url)
+        ).start()
+    elif choice == '4':
+        await update.message.reply_text("✅ <b>Performing custom merge...</b>", parse_mode='HTML')
+        threading.Thread(
+            target=task4_video_editing,
+            args=(update.effective_chat.id, 'custom_merge', context.user_data['video1_url'], url)
+        ).start()
+    return ConversationHandler.END
+
+async def handle_start_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        start_time = time_to_seconds(update.message.text.strip())
+        context.user_data['start_time'] = start_time
+        await update.message.reply_text(
+            """
+✅ <b>Send end time:</b>
+
+<i>Format examples:</i>
+• 2:30 (end at 2 minutes 30 seconds)
+• 1:45.5 (end at 1 minute 45.5 seconds)
+• Leave empty to trim to the end
+
+Reply with time or 'end' to trim to end
+            """,
+            parse_mode='HTML'
+        )
+        return WAITING_FOR_END_TIME
+    except ValueError:
+        await update.message.reply_text(
+            """
+❌ <b>Invalid time format!</b>
+
+Please use formats like:
+• 1:30
+• 0:45.5
+• 2:15:30
+            """,
+            parse_mode='HTML'
+        )
+        return WAITING_FOR_START_TIME
+
+async def handle_end_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    end_time_str = update.message.text.strip().lower()
+    if end_time_str in ['', 'end', 'e']:
+        end_time = None
+        end_msg = "to end"
+    else:
+        try:
+            end_time = time_to_seconds(end_time_str)
+            end_msg = f"to {end_time_str}"
+        except ValueError:
+            await update.message.reply_text(
+                """
+❌ <b>Invalid time format!</b>
+
+Please use valid time format or 'end'
+                """,
+                parse_mode='HTML'
+            )
+            return WAITING_FOR_END_TIME
+    choice = context.user_data.get('edit_choice', '1')
+    video_url = context.user_data.get('video_url')
+    start_time = context.user_data.get('start_time')
+    if choice == '1':
+        await update.message.reply_text(
+            f"✅ <b>Trimming video from {start_time}s {end_msg}...</b>",
+            parse_mode='HTML'
+        )
+        threading.Thread(
+            target=task4_video_editing,
+            args=(
+                update.effective_chat.id,
+                'trim',
+                video_url,
+                None,
+                start_time,
+                end_time
+            )
+        ).start()
+    elif choice == '3':
+        await update.message.reply_text(
+            f"✅ <b>Trimming and merging with intro...</b>",
+            parse_mode='HTML'
+        )
+        threading.Thread(
+            target=task4_video_editing,
+            args=(
+                update.effective_chat.id,
+                'trim_and_merge',
+                video_url,
+                None,
+                start_time,
+                end_time
+            )
+        ).start()
+    return ConversationHandler.END
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    file = await update.message.document.get_file()
+    filename = update.message.document.file_name
+    path = os.path.join(UPLOAD_TEMP_DIR, filename)
+    # Create temp directory if it doesn't exist
+    os.makedirs(UPLOAD_TEMP_DIR, exist_ok=True)
+    await update.message.reply_text(
+        f"📥 <b>Downloading {filename}...</b>",
+        parse_mode='HTML'
+    )
+    await file.download_to_drive(path)
+    await update.message.reply_text(
+        f"✅ <b>Uploading to up-4ever.net...</b>",
+        parse_mode='HTML'
+    )
+    threading.Thread(
+        target=task1_upload_to_up4ever,
+        args=(path, update.effective_chat.id)
+    ).start()
+
+async def handle_direct_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = update.message.text.strip()
+    # Check if it's a URL
+    if not url.startswith(('http://', 'https://')):
+        return
+    await update.message.reply_text("✅ <b>Downloading file...</b>", parse_mode='HTML')
+    # Extract filename from URL
+    parsed_url = urlparse(url)
+    filename = os.path.basename(parsed_url.path)
+    if not filename or '.' not in filename:
+        filename = f"download_{int(time.time())}.bin"
+    path = os.path.join(UPLOAD_TEMP_DIR, filename)
+    os.makedirs(UPLOAD_TEMP_DIR, exist_ok=True)
+    if download_file_from_url(url, path):
+        await update.message.reply_text(
+            f"✅ <b>Uploading to up-4ever.net...</b>",
+            parse_mode='HTML'
+        )
+        threading.Thread(
+            target=task1_upload_to_up4ever,
+            args=(path, update.effective_chat.id)
+        ).start()
+    else:
+        await update.message.reply_text(
+            """
+❌ <b>Failed to download file from URL.</b>
+
+Please check the URL and try again.
+            """,
+            parse_mode='HTML'
+        )
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_cookies = download_and_parse_cookies()
+    account = user_cookies.get('login', 'unknown')
+    ffmpeg_status = "✅ Working" if check_ffmpeg() else "❌ Not working"
+    # Check Drive token
+    token_data, _ = download_drive_token()
+    drive_status = "✅ Connected" if token_data else "❌ Not connected"
+    # Count files in temp directory
+    temp_files = 0
+    if os.path.exists(UPLOAD_TEMP_DIR):
+        temp_files = len([f for f in os.listdir(UPLOAD_TEMP_DIR) if os.path.isfile(os.path.join(UPLOAD_TEMP_DIR, f))])
+    text = f"""
+📊 <b>Bot Status</b>
+
+🤖 <b>Bot:</b> Online
+👤 <b>Account:</b> {account}
+📹 <b>FFmpeg:</b> {ffmpeg_status}
+☁️ <b>Google Drive:</b> {drive_status}
+🗂️ <b>Temp Files:</b> {temp_files}
+
+<b>Available Tasks:</b>
+1. 📤 Upload to up-4ever.net
+2. ☁️ Upload to Google Drive
+3. 🎬 Video watermarking
+4. ✂️ Video editing (trim/merge)
+5. 🔗 Extract direct links
+6. ⬇️ Download from any website
+7. ☁️ Upload to JazzDrive (/jazzdrive)
+8. 📦 Export code (/code)
+
+<b>Last Updated:</b> {datetime.now().strftime('%H:%M:%S')}
+    """
+    await update.message.reply_text(text, parse_mode='HTML')
+
+async def debug_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Debug session state"""
+    has_manager = 'download_manager' in context.user_data
+    has_jazz_manager = 'jazz_manager' in context.user_data
+    debug_info = f"""
+🔧 <b>Session Debug Info</b>
+
+📊 Download Manager: {'✅ Present' if has_manager else '❌ Missing'}
+☁️ JazzDrive Manager: {'✅ Present' if has_jazz_manager else '❌ Missing'}
+User Data Keys: {list(context.user_data.keys())}
+    """
+    if has_manager:
+        manager = context.user_data['download_manager']
+        debug_info += f"\n📱 Download Manager URL: {manager.url}"
+        debug_info += f"\n⏰ Last Activity: {time.time() - manager.last_activity:.0f}s ago"
+        debug_info += f"\n📋 Formats: {len(manager.formats)} available"
+    if has_jazz_manager:
+        jazz_manager = context.user_data['jazz_manager']
+        debug_info += f"\n\n☁️ JazzDrive Manager URL: {jazz_manager.url}"
+        debug_info += f"\n⏰ Last Activity: {time.time() - jazz_manager.last_activity:.0f}s ago"
+        debug_info += f"\n📋 Formats: {len(jazz_manager.formats)} available"
+    await update.message.reply_text(debug_info, parse_mode='HTML')
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        """
+❌ <b>Operation cancelled.</b>
+
+You can start a new operation with any command.
+        """,
+        parse_mode='HTML'
+    )
+    return ConversationHandler.END
+
+# --- CALLBACK QUERY HANDLER ---
+async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle all callback queries"""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    chat_id = update.effective_chat.id
+    message_id = query.message.message_id
+    # Handle download callbacks (from /download)
+    if data.startswith("dl_"):
+        # Check if we have a download manager in user_data
+        download_manager = context.user_data.get('download_manager')
+        if not download_manager:
+            # Try to find expired session and clear it
+            context.user_data.pop('download_manager', None)
+            await query.edit_message_text(
+                """
+<b>❌ Download session expired.</b>
+
+Please use /download again to start a new download.
+                """,
+                parse_mode='HTML'
+            )
+            return
+        # Process the callback
+        result = handle_download_callback(
+            data,
+            query.id,
+            chat_id,
+            message_id,
+            context.user_data
+        )
+        if result in ["cancelled", "expired", "error"]:
+            # Clear download manager
+            context.user_data.pop('download_manager', None)
+            if result == "expired":
+                await query.edit_message_text(
+                    """
+<b>❌ Download session expired.</b>
+
+Please use /download again to start a new download.
+                    """,
+                    parse_mode='HTML'
+                )
+            elif result == "cancelled":
+                await query.edit_message_text(
+                    "<b>❌ Download cancelled.</b>",
+                    parse_mode='HTML'
+                )
+    # Handle JazzDrive callbacks (from /jazzdrive)
+    elif data.startswith("jazz_"):
+        # Check if we have a jazz manager in user_data
+        jazz_manager = context.user_data.get('jazz_manager')
+        if not jazz_manager:
+            # Try to find expired session and clear it
+            context.user_data.pop('jazz_manager', None)
+            context.user_data.pop('jazz_driver', None)
+            await query.edit_message_text(
+                """
+<b>❌ JazzDrive session expired.</b>
+
+Please use /jazzdrive again.
+                """,
+                parse_mode='HTML'
+            )
+            return
+        # Process the callback
+        result = handle_jazzdrive_callback(
+            data,
+            query.id,
+            chat_id,
+            message_id,
+            context.user_data
+        )
+        if result in ["cancelled", "expired", "error"]:
+            # Clear jazz manager and driver
+            context.user_data.pop('jazz_manager', None)
+            context.user_data.pop('jazz_driver', None)
+            if result == "expired":
+                await query.edit_message_text(
+                    """
+<b>❌ JazzDrive session expired.</b>
+
+Please use /jazzdrive again.
+                    """,
+                    parse_mode='HTML'
+                )
+            elif result == "cancelled":
+                await query.edit_message_text(
+                    "<b>❌ JazzDrive upload cancelled.</b>",
+                    parse_mode='HTML'
+                )
+    else:
+        # Handle other callbacks if any
+        await query.edit_message_text(f"Callback: {data}")
+
+# --- MAIN FUNCTION ---
+def main():
+    # Check FFmpeg before starting
+    print("\n" + "="*60)
+    print("🤖 Initializing File Processing Bot")
+    print("="*60)
+    if not check_ffmpeg():
+        print("⚠️ FFmpeg is not working! Video tasks will fail.")
+        print("Trying to install FFmpeg...")
+        if sys.platform == 'linux':
+            os.system("sudo apt-get update && sudo apt-get install -y ffmpeg")
+        elif sys.platform == 'darwin':
+            os.system("brew install ffmpeg")
+        else:
+            print("Please install FFmpeg from: https://ffmpeg.org/download.html")
+        time.sleep(2)
+        check_ffmpeg()
+    
+    # Create upload directory
+    os.makedirs(UPLOAD_TEMP_DIR, exist_ok=True)
+    
+    # Initialize application
+    application = Application.builder().token(TOKEN).build()
+    
+    # Add command handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("upload", upload_command))
+    application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("code", code_command))
+    application.add_handler(CommandHandler("debug", debug_session))
+    
+    # Google Drive conversation handler
+    application.add_handler(ConversationHandler(
+        entry_points=[CommandHandler('gdrive', gdrive_command)],
+        states={
+            WAITING_FOR_GDRIVE_URL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_gdrive_url)
+            ]
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    ))
+    
+    # Video watermark conversation handler
+    application.add_handler(ConversationHandler(
+        entry_points=[CommandHandler('video', video_command)],
+        states={
+            WAITING_FOR_VIDEO_URL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_video_url)
+            ],
+            WAITING_FOR_WATERMARK_TYPE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_watermark_type)
+            ],
+            WAITING_FOR_LOGO_URL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_logo_url)
+            ],
+            WAITING_FOR_TEXT_WATERMARK: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_watermark)
+            ]
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    ))
+    
+    # Video editing conversation handler
+    application.add_handler(ConversationHandler(
+        entry_points=[CommandHandler('edit', edit_command)],
+        states={
+            WAITING_FOR_EDIT_CHOICE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_edit_choice)
+            ],
+            WAITING_FOR_TRIM_VIDEO_URL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_trim_video_url)
+            ],
+            WAITING_FOR_VIDEO1_URL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_video1_url)
+            ],
+            WAITING_FOR_VIDEO2_URL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_video2_url)
+            ],
+            WAITING_FOR_START_TIME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_start_time)
+            ],
+            WAITING_FOR_END_TIME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_end_time)
+            ]
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    ))
+    
+    # Extract conversation handler
+    application.add_handler(ConversationHandler(
+        entry_points=[CommandHandler('extract', extract_command)],
+        states={
+            WAITING_FOR_GDRIVE_LINK_EXTRACT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_extract_link)
+            ]
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    ))
+    
+    # Download conversation handler
+    application.add_handler(ConversationHandler(
+        entry_points=[CommandHandler('download', download_command)],
+        states={
+            WAITING_FOR_DOWNLOAD_URL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_download_url)
+            ]
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    ))
+    
+    # JazzDrive conversation handler
+    application.add_handler(ConversationHandler(
+        entry_points=[CommandHandler('jazzdrive', jazzdrive_command)],
+        states={
+            WAITING_FOR_JAZZDRIVE_URL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_jazzdrive_url)
+            ]
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    ))
+    
+    # JazzDrive login conversation handler
+    application.add_handler(ConversationHandler(
+        entry_points=[CommandHandler('jazzdrive_login', jazzdrive_login_command)],
+        states={
+            WAITING_FOR_JAZZ_PHONE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_jazz_phone)
+            ],
+            WAITING_FOR_JAZZ_OTP: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_jazz_otp)
+            ]
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    ))
+    
+    # Callback query handler
+    application.add_handler(CallbackQueryHandler(handle_callback_query))
+    
+    # Document and URL handlers
+    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_direct_url))
+    
+    print("\n✅ Bot initialized successfully!")
+    print(f"📁 Temp directory: {UPLOAD_TEMP_DIR}")
+    print(f"📹 FFmpeg: {'✅ Working' if check_ffmpeg() else '❌ Not working'}")
+    
+    print("\n📋 Available commands:")
+    print("  /start            - Start the bot")
+    print("  /upload           - Upload to up-4ever.net")
+    print("  /gdrive           - Upload to Google Drive")
+    print("  /video            - Add watermarks to videos")
+    print("  /edit             - Trim/merge videos")
+    print("  /extract          - Get direct download links")
+    print("  /download         - Download from any website")
+    print("  /jazzdrive        - Upload to JazzDrive")
+    print("  /jazzdrive_login  - Login to JazzDrive")
+    print("  /status           - Check bot status")
+    print("  /debug            - Debug session info")
+    print("  /code             - Export all code files")
+    print("="*60 + "\n")
+    
+    # Start the bot
+    print("🚀 Starting bot polling...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == '__main__':
+    main()

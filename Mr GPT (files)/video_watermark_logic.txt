@@ -1,0 +1,439 @@
+def task3_process_video(video_url, logo_url, watermark_type, text_content, chat_id):
+    """Process video with professional watermarks - optimized for Colab"""
+    import os, time, tempfile, logging, numpy as np, shutil, subprocess, sys, base64
+    from moviepy.editor import VideoFileClip, ImageClip, CompositeVideoClip
+    from PIL import Image, ImageDraw, ImageFont
+    from __main__ import send_telegram_message, download_file_from_url, upload_to_drive, logger
+    
+    def log_progress(text, send_to_telegram=False):
+        """Log to Colab and optionally send to Telegram"""
+        logger.info(f"[VIDEO PROCESS] {text}")
+        if send_to_telegram:
+            send_telegram_message(chat_id, f"<b>{text}</b>")
+    
+    def get_video_bitrate(video_path):
+        """Get original video bitrate to maintain similar quality/size"""
+        try:
+            cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', 
+                   '-show_entries', 'stream=bit_rate', '-of', 'default=noprint_wrappers=1:nokey=1', 
+                   video_path]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            bitrate = result.stdout.strip()
+            if bitrate and bitrate != 'N/A':
+                return int(bitrate) // 1000  # Convert to kbps
+        except:
+            pass
+        return None  # Return None to let ffmpeg decide
+    
+    def create_fallback_font():
+        """Create a fallback font if external font fails"""
+        try:
+            font_paths = [
+                "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                "/usr/share/fonts/truetype/ubuntu/Ubuntu-Bold.ttf"
+            ]
+            
+            for font_path in font_paths:
+                if os.path.exists(font_path):
+                    return ImageFont.truetype(font_path, 50)
+            
+            return ImageFont.load_default()
+        except:
+            return ImageFont.load_default()
+    
+    def get_watermark_position(position_str, video_width, video_height, watermark_width, watermark_height, margin=20):
+        """Get position coordinates based on user selection"""
+        positions = {
+            'bottom_right': (video_width - watermark_width - margin, video_height - watermark_height - margin),
+            'bottom_left': (margin, video_height - watermark_height - margin),
+            'top_right': (video_width - watermark_width - margin, margin),
+            'top_left': (margin, margin)
+        }
+        return positions.get(position_str, positions['bottom_right'])
+    
+    temp_dir = tempfile.gettempdir()
+    video_path = None
+    logo_path = None
+    output_files = []
+    
+    try:
+        # Send start message
+        send_telegram_message(chat_id, "<b>🎬 Starting Professional Video Processing</b>")
+        log_progress("Starting video watermark processing", False)
+        
+        # Position selection message
+        position_msg = """
+<b>🎯 Select Watermark Position:</b>
+Please reply with one of the following options:
+• bottom_right
+• bottom_left
+• top_right
+• top_left
+"""
+        send_telegram_message(chat_id, position_msg)
+        selected_position = 'bottom_right'  # Default
+        send_telegram_message(chat_id, f"<b>📍 Using position: {selected_position} (default)</b>")
+        
+        # Download video
+        log_progress("Downloading video...", False)
+        video_path = os.path.join(temp_dir, f"video_{int(time.time())}.mp4")
+        
+        if not download_file_from_url(video_url, video_path):
+            send_telegram_message(chat_id, "<b>❌ Failed to download video</b>")
+            return
+        
+        # Get original file size for comparison
+        original_size = os.path.getsize(video_path) / (1024 * 1024)
+        log_progress(f"Original video size: {original_size:.2f} MB", False)
+        
+        # Download logo if provided
+        if logo_url and watermark_type in ['static', 'combined']:
+            log_progress("Downloading logo...", False)
+            logo_path = os.path.join(temp_dir, f"logo_{int(time.time())}.png")
+            if not download_file_from_url(logo_url, logo_path):
+                log_progress("Failed to download logo, using text-only", False)
+                logo_path = None
+        
+        # Load video
+        log_progress("Loading video...", False)
+        video = VideoFileClip(video_path)
+        
+        # Get original video bitrate
+        original_bitrate = get_video_bitrate(video_path)
+        if original_bitrate:
+            log_progress(f"Original video bitrate: {original_bitrate} kbps", False)
+        else:
+            # Default to a reasonable bitrate based on resolution
+            if video.size[0] * video.size[1] > 1920 * 1080:  # > 1080p
+                original_bitrate = 4000
+            elif video.size[0] * video.size[1] > 1280 * 720:  # > 720p
+                original_bitrate = 2500
+            else:  # <= 720p
+                original_bitrate = 1500
+        
+        video_info = f"Duration: {video.duration:.2f}s | Resolution: {video.size[0]}x{video.size[1]} | FPS: {video.fps}"
+        log_progress(f"Video Info: {video_info}", True)
+        
+        # Text parameters
+        text = text_content if text_content else "Watermark Text"
+        text_padding = 15
+        margin = 20
+        
+        # ADAPTIVE SCROLLING SPEED
+        if video.duration <= 10:
+            scroll_speed = 80
+            initial_delay = 0
+            cycle_gap = 2
+        elif video.duration <= 30:
+            scroll_speed = 60
+            initial_delay = 1
+            cycle_gap = 5
+        else:
+            scroll_speed = 40
+            initial_delay = 30
+            cycle_gap = 30
+        
+        log_progress(f"Scroll: {scroll_speed}px/s | Text: '{text}'", False)
+        
+        # Use fallback font
+        font = create_fallback_font()
+        
+        # Text measurement
+        temp_img = Image.new('RGB', (1000, 1000))
+        temp_draw = ImageDraw.Draw(temp_img)
+        bbox = temp_draw.textbbox((0, 0), text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        
+        log_progress(f"Text size: {text_width}x{text_height}px", False)
+        
+        # Get text position
+        text_pos_x, text_pos_y = get_watermark_position(
+            selected_position,
+            video.w,
+            video.h,
+            text_width + (2 * text_padding),
+            text_height + (2 * text_padding),
+            margin
+        )
+        
+        # ===============================================
+        # PROCESS WATERMARK BASED ON TYPE
+        # ===============================================
+        
+        if watermark_type in ['static', 'combined'] and logo_path and os.path.exists(logo_path):
+            log_progress("Processing static logo watermark...", False)
+            try:
+                logo_img = Image.open(logo_path).convert('RGBA')
+                
+                # Resize logo
+                logo_height = int(video.h * 0.07)
+                logo_width = int(logo_img.width * (logo_height / logo_img.height))
+                logo_img = logo_img.resize((logo_width, logo_height), Image.Resampling.LANCZOS)
+                
+                # Get position
+                pos_x, pos_y = get_watermark_position(
+                    selected_position, 
+                    video.w, 
+                    video.h, 
+                    logo_width, 
+                    logo_height, 
+                    margin
+                )
+                
+                def add_logo_watermark(get_frame, t):
+                    """Add logo to each frame"""
+                    frame = get_frame(t)
+                    pil_frame = Image.fromarray(frame)
+                    
+                    if pil_frame.mode != 'RGBA':
+                        pil_frame = pil_frame.convert('RGBA')
+                    
+                    pil_frame.paste(logo_img, (pos_x, pos_y), logo_img)
+                    return np.array(pil_frame.convert('RGB'))
+                
+                video_with_logo = video.fl(add_logo_watermark)
+                
+            except Exception as e:
+                log_progress(f"Logo error: {str(e)}", False)
+                video_with_logo = video
+        
+        if watermark_type in ['text', 'combined']:
+            log_progress("Processing scrolling text...", False)
+            
+            def add_scrolling_text(get_frame, t):
+                """Add scrolling text to each frame"""
+                frame = get_frame(t)
+                pil_img = Image.fromarray(frame)
+                
+                if pil_img.mode != 'RGBA':
+                    pil_img = pil_img.convert('RGBA')
+                
+                draw = ImageDraw.Draw(pil_img)
+                
+                if t < initial_delay:
+                    return np.array(pil_img.convert('RGB'))
+                
+                time_since_start = max(0, t - initial_delay)
+                
+                if video.duration <= 10:
+                    loop_duration = (video.w + text_width) / scroll_speed
+                    progress = (time_since_start % loop_duration) / loop_duration
+                    x_pos = int(video.w - progress * (video.w + text_width))
+                    y_pos = text_pos_y
+                else:
+                    active_duration = (video.w + text_width) / scroll_speed
+                    total_cycle = active_duration + cycle_gap
+                    time_in_cycle = time_since_start % total_cycle
+                    
+                    if time_in_cycle <= active_duration:
+                        progress = time_in_cycle / active_duration
+                        x_pos = int(video.w - progress * (video.w + text_width))
+                        y_pos = text_pos_y
+                    else:
+                        return np.array(pil_img.convert('RGB'))
+                
+                # Draw semi-transparent background and text
+                overlay = Image.new('RGBA', pil_img.size, (0, 0, 0, 0))
+                overlay_draw = ImageDraw.Draw(overlay)
+                
+                overlay_draw.rectangle(
+                    [(x_pos - text_padding, y_pos - text_padding),
+                     (x_pos + text_width + text_padding, y_pos + text_height + text_padding)],
+                    fill=(0, 0, 0, 200)
+                )
+                
+                overlay_draw.text(
+                    (x_pos, y_pos - bbox[1]),
+                    text,
+                    font=font,
+                    fill=(255, 255, 255, 255)
+                )
+                
+                pil_img = Image.alpha_composite(pil_img, overlay)
+                return np.array(pil_img.convert('RGB'))
+            
+            video_with_text = video.fl(add_scrolling_text)
+        
+        # Create and save final video with OPTIMIZED settings
+        if watermark_type == 'static' and logo_path:
+            output_path = os.path.join(temp_dir, f"static_logo_{int(time.time())}.mp4")
+            log_progress(f"Saving static logo version with optimized bitrate ({original_bitrate} kbps)...", False)
+            
+            # Use optimized encoding settings
+            video_with_logo.write_videofile(
+                output_path,
+                codec='libx264',
+                audio_codec='aac',
+                threads=4,
+                preset='medium',
+                bitrate=f'{original_bitrate}k',  # Use original bitrate
+                ffmpeg_params=[
+                    '-crf', '23',  # Quality control (lower = better quality, higher = smaller file)
+                    '-movflags', '+faststart',  # Optimize for streaming
+                    '-profile:v', 'baseline',  # Broad compatibility
+                    '-level', '3.0'
+                ],
+                verbose=False,
+                logger=None
+            )
+            output_files.append(("Static Logo Watermark", output_path))
+            
+        elif watermark_type == 'text':
+            output_path = os.path.join(temp_dir, f"scrolling_text_{int(time.time())}.mp4")
+            log_progress(f"Saving scrolling text version with optimized bitrate ({original_bitrate} kbps)...", False)
+            
+            video_with_text.write_videofile(
+                output_path,
+                codec='libx264',
+                audio_codec='aac',
+                threads=4,
+                preset='medium',
+                bitrate=f'{original_bitrate}k',
+                ffmpeg_params=[
+                    '-crf', '23',
+                    '-movflags', '+faststart',
+                    '-profile:v', 'baseline',
+                    '-level', '3.0'
+                ],
+                verbose=False,
+                logger=None
+            )
+            output_files.append(("Scrolling Text Watermark", output_path))
+            
+        elif watermark_type == 'combined' and logo_path:
+            def add_combined_watermarks(get_frame, t):
+                """Add both logo and text to each frame"""
+                frame = get_frame(t)
+                pil_img = Image.fromarray(frame)
+                
+                if pil_img.mode != 'RGBA':
+                    pil_img = pil_img.convert('RGBA')
+                
+                # Add logo
+                pil_img.paste(logo_img, (pos_x, pos_y), logo_img)
+                
+                # Add scrolling text
+                if t >= initial_delay:
+                    time_since_start = t - initial_delay
+                    
+                    if video.duration <= 10:
+                        loop_duration = (video.w + text_width) / scroll_speed
+                        progress = (time_since_start % loop_duration) / loop_duration
+                        x_pos = int(video.w - progress * (video.w + text_width))
+                        y_pos = text_pos_y
+                    else:
+                        active_duration = (video.w + text_width) / scroll_speed
+                        total_cycle = active_duration + cycle_gap
+                        time_in_cycle = time_since_start % total_cycle
+                        
+                        if time_in_cycle <= active_duration:
+                            progress = time_in_cycle / active_duration
+                            x_pos = int(video.w - progress * (video.w + text_width))
+                            y_pos = text_pos_y
+                            
+                            overlay = Image.new('RGBA', pil_img.size, (0, 0, 0, 0))
+                            overlay_draw = ImageDraw.Draw(overlay)
+                            
+                            overlay_draw.rectangle(
+                                [(x_pos - text_padding, y_pos - text_padding),
+                                 (x_pos + text_width + text_padding, y_pos + text_height + text_padding)],
+                                fill=(0, 0, 0, 200)
+                            )
+                            
+                            overlay_draw.text(
+                                (x_pos, y_pos - bbox[1]),
+                                text,
+                                font=font,
+                                fill=(255, 255, 255, 255)
+                            )
+                            
+                            pil_img = Image.alpha_composite(pil_img, overlay)
+                
+                return np.array(pil_img.convert('RGB'))
+            
+            video_combined = video.fl(add_combined_watermarks)
+            output_path = os.path.join(temp_dir, f"combined_{int(time.time())}.mp4")
+            log_progress(f"Saving combined version with optimized bitrate ({original_bitrate} kbps)...", False)
+            
+            video_combined.write_videofile(
+                output_path,
+                codec='libx264',
+                audio_codec='aac',
+                threads=4,
+                preset='medium',
+                bitrate=f'{original_bitrate}k',
+                ffmpeg_params=[
+                    '-crf', '23',
+                    '-movflags', '+faststart',
+                    '-profile:v', 'baseline',
+                    '-level', '3.0'
+                ],
+                verbose=False,
+                logger=None
+            )
+            output_files.append(("Combined Watermarks", output_path))
+        
+        # Upload to Google Drive
+        for file_name, file_path in output_files:
+            if not os.path.exists(file_path):
+                continue
+                
+            new_size = os.path.getsize(file_path) / (1024 * 1024)
+            size_change = ((new_size - original_size) / original_size) * 100
+            
+            log_progress(f"Output file size: {new_size:.2f} MB ({size_change:+.1f}% vs original)", True)
+            
+            drive_url = upload_to_drive(file_path, chat_id)
+            
+            if drive_url:
+                log_progress(f"✅ {file_name} uploaded!", False)
+                send_telegram_message(chat_id, f"<b>✅ {file_name} uploaded to Google Drive!</b>\n🔗 {drive_url}")
+            else:
+                log_progress(f"⚠️ Failed to upload {file_name}", False)
+                send_telegram_message(chat_id, f"<b>⚠️ Failed to upload {file_name}</b>")
+            
+            try:
+                os.remove(file_path)
+            except:
+                pass
+        
+        # Final summary with size comparison
+        summary_msg = f"""
+<b>✅ Video Processing Complete!</b>
+
+📊 <b>Summary:</b>
+Duration: {video.duration:.2f}s
+Resolution: {video.size[0]}x{video.size[1]}
+Original Size: {original_size:.2f} MB
+Output Size: {new_size:.2f} MB
+Size Change: {size_change:+.1f}%
+Watermark Type: {watermark_type}
+Watermark Position: {selected_position}
+Text: '{text}'
+Files Created: {len(output_files)}
+        """
+        send_telegram_message(chat_id, summary_msg)
+        
+        # Clean up video objects
+        video.close()
+        if 'video_with_logo' in locals():
+            video_with_logo.close()
+        if 'video_with_text' in locals():
+            video_with_text.close()
+        if 'video_combined' in locals():
+            video_combined.close()
+        
+    except Exception as e:
+        logger.error(f"[VIDEO PROCESSING] Error: {e}")
+        send_telegram_message(chat_id, f"<b>❌ Video Processing Failed</b>\n{str(e)[:200]}")
+    
+    finally:
+        # Cleanup files
+        for file_path in [video_path, logo_path]:
+            if file_path and os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except:
+                    pass

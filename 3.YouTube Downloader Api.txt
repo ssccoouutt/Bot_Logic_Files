@@ -1,0 +1,721 @@
+import os
+import sys
+import json
+import re
+import time
+import socket
+import atexit
+import threading
+import subprocess
+import importlib.util
+from datetime import datetime
+
+def install_dependencies():
+    """Install required packages if not already installed"""
+    required_packages = {
+        'flask': 'flask',
+        'flask-restful': 'flask-restful',
+        'pyngrok': 'pyngrok',
+        'yt-dlp': 'yt-dlp'
+    }
+    
+    print("Checking dependencies...")
+    
+    for package_name, install_name in required_packages.items():
+        try:
+            # Try to import the package
+            spec = importlib.util.find_spec(package_name.replace('-', '_'))
+            if spec is None:
+                raise ImportError
+            print(f"✅ {package_name} is already installed")
+        except ImportError:
+            print(f"Installing {package_name}...")
+            try:
+                # Try to install the package
+                subprocess.check_call([
+                    sys.executable, "-m", "pip", "install", 
+                    install_name
+                ])
+                print(f"✅ Successfully installed {package_name}")
+            except subprocess.CalledProcessError as e:
+                print(f"❌ Failed to install {package_name}: {e}")
+                print(f"Please install manually: pip install {install_name}")
+                return False
+    
+    print("✅ All dependencies are installed and ready!")
+    return True
+
+# Install dependencies first
+if not install_dependencies():
+    print("\n❌ Failed to install dependencies. Please install manually:")
+    print("pip install flask flask-restful pyngrok yt-dlp")
+    sys.exit(1)
+
+# Now import all modules after dependencies are installed
+from flask import Flask, request, jsonify
+from pyngrok import ngrok
+import yt_dlp
+
+# Your ngrok authtoken - replace with your actual token
+NGROK_AUTH_TOKEN = "38n2j3NYy8xoJVpEmJULGrVh0IC_3P54gAvHFTcUqz6raBtRf"
+
+# Function to find an available port
+def find_available_port(start_port=5002, max_port=5050):
+    """Find an available port starting from start_port"""
+    for port in range(start_port, max_port + 1):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            result = sock.bind(('0.0.0.0', port))
+            sock.close()
+            return port
+        except:
+            continue
+    raise Exception(f"No available ports between {start_port} and {max_port}")
+
+# Find an available port
+PORT = find_available_port()
+print(f"✅ Found available port: {PORT}")
+
+# Set ngrok authtoken
+ngrok.set_auth_token(NGROK_AUTH_TOKEN)
+
+# Create Flask app
+app = Flask(__name__)
+
+# Function to extract video ID from YouTube URL
+def extract_video_id(url):
+    """Extract YouTube video ID from various URL formats"""
+    patterns = [
+        r'(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/|youtube\.com/v/)([a-zA-Z0-9_-]{11})',
+        r'(?:youtube\.com/watch\?.*v=)([a-zA-Z0-9_-]{11})',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+# Function to get video info and download links
+def get_youtube_video_info(video_url, quality='best'):
+    """
+    Get YouTube video information and download links
+    
+    Args:
+        video_url: YouTube video URL
+        quality: 'best', 'worst', or specific format ID
+    
+    Returns:
+        Dictionary with video info and download links
+    """
+    try:
+        # YouTube DL options
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': False,
+            'format': 'best' if quality == 'best' else 'worst' if quality == 'worst' else quality,
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # Extract video info
+            info = ydl.extract_info(video_url, download=False)
+            
+            # Get all available formats
+            formats = info.get('formats', [])
+            
+            # Find the best video+audio format
+            best_format = None
+            video_formats = []
+            
+            for f in formats:
+                format_info = {
+                    'format_id': f.get('format_id'),
+                    'ext': f.get('ext'),
+                    'resolution': f.get('resolution', 'N/A'),
+                    'filesize': f.get('filesize'),
+                    'filesize_mb': round(f.get('filesize', 0) / (1024 * 1024), 2) if f.get('filesize') else None,
+                    'vcodec': f.get('vcodec', 'N/A'),
+                    'acodec': f.get('acodec', 'N/A'),
+                    'url': f.get('url'),
+                    'has_video': f.get('vcodec') != 'none',
+                    'has_audio': f.get('acodec') != 'none',
+                    'format_note': f.get('format_note', 'N/A')
+                }
+                video_formats.append(format_info)
+                
+                # Select best format (video + audio)
+                if f.get('vcodec') != 'none' and f.get('acodec') != 'none':
+                    if best_format is None or (f.get('height', 0) > best_format.get('height', 0)):
+                        best_format = format_info
+            
+            # If no combined format found, use best video and audio separately
+            if not best_format and video_formats:
+                # Get best video
+                video_only = [f for f in video_formats if f['has_video'] and not f['has_audio']]
+                audio_only = [f for f in video_formats if not f['has_video'] and f['has_audio']]
+                
+                if video_only:
+                    best_format = max(video_only, key=lambda x: x.get('height', 0) if x.get('height') else 0)
+            
+            # Video metadata
+            video_info = {
+                'title': info.get('title'),
+                'duration': info.get('duration'),
+                'duration_formatted': f"{info.get('duration', 0)//60}:{info.get('duration', 0)%60:02d}" if info.get('duration') else 'N/A',
+                'uploader': info.get('uploader'),
+                'view_count': info.get('view_count'),
+                'like_count': info.get('like_count'),
+                'thumbnail': info.get('thumbnail'),
+                'video_id': info.get('id'),
+                'description': info.get('description', '')[:200] + '...' if info.get('description') else 'No description',
+                'categories': info.get('categories', []),
+                'tags': info.get('tags', [])[:5],
+                'upload_date': info.get('upload_date'),
+                'age_limit': info.get('age_limit'),
+                'webpage_url': info.get('webpage_url'),
+            }
+            
+            # Get default download link (best quality)
+            default_download_link = best_format['url'] if best_format else None
+            
+            # Get download links for all formats
+            download_links = []
+            for f in video_formats[:10]:  # Limit to first 10 formats
+                if f['url']:
+                    download_links.append({
+                        'format_id': f['format_id'],
+                        'quality': f['resolution'],
+                        'extension': f['ext'],
+                        'size_mb': f['filesize_mb'],
+                        'type': 'Video+Audio' if f['has_video'] and f['has_audio'] else 'Video Only' if f['has_video'] else 'Audio Only',
+                        'download_url': f['url'],
+                        'codec_info': f"Video: {f['vcodec']}, Audio: {f['acodec']}"
+                    })
+            
+            return {
+                'success': True,
+                'video_info': video_info,
+                'default_download': {
+                    'url': default_download_link,
+                    'quality': best_format['resolution'] if best_format else 'N/A',
+                    'extension': best_format['ext'] if best_format else 'N/A',
+                    'size_mb': best_format['filesize_mb'] if best_format else None,
+                    'type': 'Direct download link'
+                } if default_download_link else None,
+                'available_formats': download_links,
+                'total_formats': len(video_formats),
+                'note': 'Links are valid for limited time (usually 6 hours). Download immediately.'
+            }
+            
+    except yt_dlp.utils.DownloadError as e:
+        return {
+            'success': False,
+            'error': f'Download error: {str(e)}',
+            'video_url': video_url
+        }
+    except yt_dlp.utils.ExtractorError as e:
+        return {
+            'success': False,
+            'error': f'Extraction error: {str(e)}',
+            'video_url': video_url
+        }
+    except Exception as e:
+        return {
+            'success': False,
+            'error': f'Unexpected error: {str(e)}',
+            'video_url': video_url
+        }
+
+# Home page with API documentation
+@app.route('/')
+def home():
+    return '''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>YouTube Video Downloader API</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 40px; }
+            .container { max-width: 1000px; margin: 0 auto; }
+            .endpoint { background: #f5f5f5; padding: 15px; border-radius: 5px; margin: 15px 0; }
+            code { background: #e0e0e0; padding: 2px 6px; border-radius: 3px; }
+            pre { background: #2d2d2d; color: #fff; padding: 15px; border-radius: 5px; overflow-x: auto; }
+            .success { color: #4CAF50; font-weight: bold; }
+            .error { color: #f44336; }
+            .warning { color: #ff9800; }
+            .test-area { background: #f0f8ff; padding: 20px; border-radius: 5px; margin: 20px 0; }
+            input[type="text"] { width: 70%; padding: 10px; margin: 5px; }
+            button { padding: 10px 20px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; }
+            button:hover { background: #45a049; }
+            .format-item { border: 1px solid #ddd; padding: 10px; margin: 5px 0; border-radius: 4px; }
+            .format-item:hover { background: #f9f9f9; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>📥 YouTube Video Downloader API</h1>
+            <p class="success">✅ Permanent API for YouTube video downloads</p>
+            
+            <div class="warning">
+                <p><strong>⚠️ Legal Notice:</strong> This API is for educational purposes only. 
+                Download videos only if you have the right to do so. Respect copyright laws.</p>
+            </div>
+            
+            <h2>API Endpoints:</h2>
+            
+            <div class="endpoint">
+                <h3>GET Request</h3>
+                <p><code>GET /download?url=YOUTUBE_URL&quality=best</code></p>
+                <p>Parameters:</p>
+                <ul>
+                    <li><strong>url</strong>: YouTube video URL (required)</li>
+                    <li><strong>quality</strong>: 'best', 'worst', or format ID (optional, default: 'best')</li>
+                    <li><strong>info_only</strong>: 'true' to get only info without download links (optional)</li>
+                </ul>
+            </div>
+            
+            <div class="endpoint">
+                <h3>POST Request</h3>
+                <p><code>POST /download</code> with JSON body:</p>
+                <pre>{
+    "url": "https://youtube.com/watch?v=VIDEO_ID",
+    "quality": "best"
+}</pre>
+            </div>
+            
+            <h3>Test Interface:</h3>
+            <div class="test-area">
+                <input type="text" id="videoUrl" placeholder="Enter YouTube URL" value="https://www.youtube.com/watch?v=dQw4w9WgXcQ">
+                <select id="quality">
+                    <option value="best">Best Quality</option>
+                    <option value="worst">Lowest Quality</option>
+                    <option value="mp4">MP4 Format</option>
+                    <option value="webm">WebM Format</option>
+                </select>
+                <label><input type="checkbox" id="infoOnly"> Info Only (no download links)</label>
+                <br><br>
+                <button onclick="testGet()">Test GET</button>
+                <button onclick="testPost()">Test POST</button>
+                <button onclick="testVideoInfo()">Get Video Info</button>
+                
+                <div id="result" style="margin-top: 15px; min-height: 100px; border: 1px solid #ddd; padding: 15px; border-radius: 5px; background: white;"></div>
+            </div>
+            
+            <h3>Example YouTube URLs:</h3>
+            <ul>
+                <li>Regular: https://www.youtube.com/watch?v=dQw4w9WgXcQ</li>
+                <li>Short: https://youtu.be/dQw4w9WgXcQ</li>
+                <li>Embed: https://www.youtube.com/embed/dQw4w9WgXcQ</li>
+                <li>With playlist: https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=...</li>
+            </ul>
+        </div>
+        
+        <script>
+            function displayResult(data) {
+                const resultDiv = document.getElementById('result');
+                
+                if (data.success === false) {
+                    resultDiv.innerHTML = `<div class="error"><h3>❌ Error</h3><p>${data.error || 'Unknown error'}</p></div>`;
+                    return;
+                }
+                
+                let html = `<div class="success"><h3>✅ Success</h3></div>`;
+                
+                // Video Info
+                if (data.video_info) {
+                    html += `<h4>📹 Video Information:</h4>`;
+                    html += `<ul>`;
+                    html += `<li><strong>Title:</strong> ${data.video_info.title || 'N/A'}</li>`;
+                    html += `<li><strong>Duration:</strong> ${data.video_info.duration_formatted || 'N/A'}</li>`;
+                    html += `<li><strong>Uploader:</strong> ${data.video_info.uploader || 'N/A'}</li>`;
+                    html += `<li><strong>Views:</strong> ${data.video_info.view_count?.toLocaleString() || 'N/A'}</li>`;
+                    html += `<li><strong>Video ID:</strong> ${data.video_info.video_id || 'N/A'}</li>`;
+                    html += `</ul>`;
+                    
+                    if (data.video_info.thumbnail) {
+                        html += `<img src="${data.video_info.thumbnail}" style="max-width: 200px; border-radius: 5px; margin: 10px 0;">`;
+                    }
+                }
+                
+                // Default Download Link
+                if (data.default_download && data.default_download.url) {
+                    html += `<h4>⬇️ Default Download Link (${data.default_download.quality}):</h4>`;
+                    html += `<div style="background: #e8f5e8; padding: 10px; border-radius: 4px; margin: 10px 0;">`;
+                    html += `<p><strong>Quality:</strong> ${data.default_download.quality}</p>`;
+                    html += `<p><strong>Format:</strong> ${data.default_download.extension}</p>`;
+                    if (data.default_download.size_mb) {
+                        html += `<p><strong>Size:</strong> ${data.default_download.size_mb} MB</p>`;
+                    }
+                    html += `<p><strong>Download:</strong> <a href="${data.default_download.url}" target="_blank" style="color: #4CAF50; font-weight: bold;">Click here to download</a></p>`;
+                    html += `<p><small>Or copy this URL: <code style="word-break: break-all;">${data.default_download.url.substring(0, 100)}...</code></small></p>`;
+                    html += `</div>`;
+                }
+                
+                // Available Formats
+                if (data.available_formats && data.available_formats.length > 0) {
+                    html += `<h4>📊 Available Formats (${data.total_formats} total):</h4>`;
+                    data.available_formats.forEach(format => {
+                        html += `<div class="format-item">`;
+                        html += `<p><strong>${format.quality}</strong> (${format.extension}) - ${format.type}</p>`;
+                        html += `<p>Size: ${format.size_mb || 'Unknown'} MB | Codec: ${format.codec_info}</p>`;
+                        if (format.download_url) {
+                            html += `<a href="${format.download_url}" target="_blank" style="color: #2196F3;">Download this format</a>`;
+                        }
+                        html += `</div>`;
+                    });
+                }
+                
+                // Notes
+                html += `<div class="warning" style="margin-top: 20px;">`;
+                html += `<p><strong>⚠️ Important:</strong></p>`;
+                html += `<ul>`;
+                html += `<li>Download links are temporary (usually valid for 6 hours)</li>`;
+                html += `<li>Download immediately for best results</li>`;
+                html += `<li>Some videos may be restricted by YouTube</li>`;
+                html += `<li>Respect copyright and terms of service</li>`;
+                html += `</ul>`;
+                html += `</div>`;
+                
+                resultDiv.innerHTML = html;
+            }
+            
+            function testGet() {
+                const videoUrl = document.getElementById('videoUrl').value;
+                const quality = document.getElementById('quality').value;
+                const infoOnly = document.getElementById('infoOnly').checked;
+                const resultDiv = document.getElementById('result');
+                
+                if (!videoUrl) {
+                    resultDiv.innerHTML = '<div class="error">Please enter a YouTube URL</div>';
+                    return;
+                }
+                
+                resultDiv.innerHTML = '⏳ Fetching video information...';
+                
+                let url = `/download?url=${encodeURIComponent(videoUrl)}&quality=${quality}`;
+                if (infoOnly) {
+                    url += '&info_only=true';
+                }
+                
+                fetch(url)
+                    .then(response => response.json())
+                    .then(data => displayResult(data))
+                    .catch(error => {
+                        resultDiv.innerHTML = `<div class="error">Error: ${error}</div>`;
+                    });
+            }
+            
+            function testPost() {
+                const videoUrl = document.getElementById('videoUrl').value;
+                const quality = document.getElementById('quality').value;
+                const infoOnly = document.getElementById('infoOnly').checked;
+                const resultDiv = document.getElementById('result');
+                
+                if (!videoUrl) {
+                    resultDiv.innerHTML = '<div class="error">Please enter a YouTube URL</div>';
+                    return;
+                }
+                
+                resultDiv.innerHTML = '⏳ Fetching video information...';
+                
+                const data = {
+                    url: videoUrl,
+                    quality: quality,
+                    info_only: infoOnly
+                };
+                
+                fetch('/download', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(data)
+                })
+                .then(response => response.json())
+                .then(data => displayResult(data))
+                .catch(error => {
+                    resultDiv.innerHTML = `<div class="error">Error: ${error}</div>`;
+                });
+            }
+            
+            function testVideoInfo() {
+                const videoUrl = document.getElementById('videoUrl').value;
+                const resultDiv = document.getElementById('result');
+                
+                if (!videoUrl) {
+                    resultDiv.innerHTML = '<div class="error">Please enter a YouTube URL</div>';
+                    return;
+                }
+                
+                resultDiv.innerHTML = '⏳ Getting video information...';
+                
+                fetch(`/info?url=${encodeURIComponent(videoUrl)}`)
+                    .then(response => response.json())
+                    .then(data => displayResult(data))
+                    .catch(error => {
+                        resultDiv.innerHTML = `<div class="error">Error: ${error}</div>`;
+                    });
+            }
+        </script>
+    </body>
+    </html>
+    '''
+
+# YouTube download API endpoint
+@app.route('/download', methods=['GET', 'POST'])
+def youtube_download():
+    """Endpoint to get YouTube video download links"""
+    try:
+        if request.method == 'GET':
+            # Get parameters from query string
+            video_url = request.args.get('url')
+            quality = request.args.get('quality', 'best')
+            info_only = request.args.get('info_only', 'false').lower() == 'true'
+        else:  # POST method
+            # Get JSON data from request
+            data = request.get_json()
+            
+            if not data:
+                return jsonify({
+                    'success': False,
+                    'error': 'No JSON data provided',
+                    'example': {'url': 'https://youtube.com/watch?v=dQw4w9WgXcQ'}
+                }), 400
+            
+            video_url = data.get('url')
+            quality = data.get('quality', 'best')
+            info_only = data.get('info_only', False)
+        
+        # Validate URL
+        if not video_url:
+            return jsonify({
+                'success': False,
+                'error': 'Please provide a YouTube URL',
+                'example': {'url': 'https://youtube.com/watch?v=dQw4w9WgXcQ'}
+            }), 400
+        
+        # Extract video ID
+        video_id = extract_video_id(video_url)
+        if not video_id:
+            return jsonify({
+                'success': False,
+                'error': 'Invalid YouTube URL. Please provide a valid YouTube video link.',
+                'provided_url': video_url,
+                'examples': [
+                    'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+                    'https://youtu.be/dQw4w9WgXcQ',
+                    'https://www.youtube.com/embed/dQw4w9WgXcQ'
+                ]
+            }), 400
+        
+        # Get video info and download links
+        result = get_youtube_video_info(video_url, quality)
+        
+        # If info_only is True, remove download URLs
+        if info_only and result.get('success'):
+            if 'default_download' in result:
+                result['default_download']['url'] = None
+            if 'available_formats' in result:
+                for fmt in result['available_formats']:
+                    fmt['download_url'] = None
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Server error: {str(e)}',
+            'note': 'Please try again or check the YouTube URL'
+        }), 500
+
+# Video info only endpoint
+@app.route('/info', methods=['GET'])
+def video_info():
+    """Endpoint to get video information without download links"""
+    try:
+        video_url = request.args.get('url')
+        
+        if not video_url:
+            return jsonify({
+                'success': False,
+                'error': 'Please provide a YouTube URL'
+            }), 400
+        
+        video_id = extract_video_id(video_url)
+        if not video_id:
+            return jsonify({
+                'success': False,
+                'error': 'Invalid YouTube URL'
+            }), 400
+        
+        # Get video info
+        result = get_youtube_video_info(video_url, 'best')
+        
+        # Remove download URLs
+        if result.get('success'):
+            if 'default_download' in result:
+                result['default_download']['url'] = None
+            if 'available_formats' in result:
+                for fmt in result['available_formats']:
+                    fmt['download_url'] = None
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Server error: {str(e)}'
+        }), 500
+
+# Health check endpoint
+@app.route('/health')
+def health_check():
+    return jsonify({
+        'status': 'healthy',
+        'service': 'youtube-downloader-api',
+        'timestamp': time.time(),
+        'port': PORT,
+        'version': '1.0'
+    })
+
+# Function to start ngrok tunnel
+def start_ngrok_tunnel(port):
+    """Start ngrok tunnel and return public URL"""
+    try:
+        print("Starting ngrok tunnel...")
+        
+        tunnel_name = "youtube-downloader-api"
+        print(f"Using reserved name: {tunnel_name}")
+        
+        try:
+            tunnel = ngrok.connect(port, name=tunnel_name, bind_tls=True)
+            print(f"✅ Reserved name successful")
+        except Exception as e:
+            print(f"⚠️ Could not use reserved name: {e}")
+            print("Using regular tunnel...")
+            tunnel = ngrok.connect(port, bind_tls=True)
+        
+        public_url = tunnel.public_url
+        print(f"✅ Permanent URL established: {public_url}")
+        
+        return public_url, tunnel
+        
+    except Exception as e:
+        print(f"❌ Error starting ngrok: {e}")
+        raise
+
+# Global variable to store tunnel
+tunnel = None
+
+# Function to keep the tunnel alive
+def keep_tunnel_alive(public_url):
+    """Periodically ping the server to keep it alive"""
+    import requests
+    while True:
+        try:
+            time.sleep(300)
+            response = requests.get(f"{public_url}/health", timeout=10)
+            if response.status_code == 200:
+                print(f"🔄 Keep-alive ping successful: {time.strftime('%H:%M:%S')}")
+        except:
+            pass
+
+# Cleanup function
+def cleanup():
+    """Cleanup function to run on exit"""
+    print("\nCleaning up...")
+    try:
+        if tunnel:
+            ngrok.disconnect(tunnel.public_url)
+    except:
+        pass
+    try:
+        ngrok.kill()
+    except:
+        pass
+    print("👋 Server stopped")
+
+# Register cleanup
+atexit.register(cleanup)
+
+# Main function to run everything
+def main():
+    global tunnel
+    
+    print("=" * 60)
+    print("Setting up YouTube Video Downloader API")
+    print(f"Using port: {PORT}")
+    print("=" * 60)
+    
+    # Kill existing ngrok processes
+    try:
+        ngrok.kill()
+    except:
+        pass
+    
+    # Start ngrok tunnel
+    try:
+        public_url, tunnel = start_ngrok_tunnel(PORT)
+    except:
+        tunnel = ngrok.connect(PORT, bind_tls=True)
+        public_url = tunnel.public_url
+    
+    print("\n" + "=" * 60)
+    print("YOUR PERMANENT API URLS:")
+    print("=" * 60)
+    print(f"Home Page: {public_url}/")
+    print(f"Download API: {public_url}/download")
+    print(f"Info API: {public_url}/info")
+    print(f"Health Check: {public_url}/health")
+    print("=" * 60)
+    
+    print("\nExample Usage:")
+    print(f"1. GET Request: curl '{public_url}/download?url=https://youtube.com/watch?v=dQw4w9WgXcQ&quality=best'")
+    print(f"2. POST Request: curl -X POST '{public_url}/download' \\")
+    print("     -H 'Content-Type: application/json' \\")
+    print("     -d '{\"url\": \"https://youtube.com/watch?v=dQw4w9WgXcQ\"}'")
+    print("=" * 60)
+    
+    print("\nFeatures:")
+    print("✅ Permanent URL (same every time)")
+    print("✅ Direct YouTube video download links")
+    print("✅ Multiple quality options")
+    print("✅ Video information extraction")
+    print("✅ GET and POST methods")
+    print("=" * 60)
+    
+    print("\nImportant Notes:")
+    print(f"• Your URL: {public_url}")
+    print("• Links are temporary (usually 6 hours)")
+    print("• Download immediately after getting link")
+    print("• Respect YouTube Terms of Service")
+    print("• Educational purposes only")
+    print("=" * 60)
+    
+    # Start keep-alive thread
+    keep_alive_thread = threading.Thread(
+        target=keep_tunnel_alive, 
+        args=(public_url,), 
+        daemon=True
+    )
+    keep_alive_thread.start()
+    
+    # Start Flask server
+    print(f"\nStarting server on port {PORT}...")
+    print("Server is running. Keep this window active!")
+    app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False, threaded=True)
+
+# Run the main function
+if __name__ == '__main__':
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\nInterrupted by user")
+        cleanup()
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
+        cleanup()

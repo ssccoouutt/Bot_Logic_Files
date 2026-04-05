@@ -1,0 +1,1101 @@
+def task7_upload_to_jazzdrive(url, chat_id, context_data=None, callback_query=None):
+    """Upload files to JazzDrive - Professional Version"""
+    import os, time, tempfile, logging, json, subprocess, sys, re, shutil, yt_dlp, threading, requests, pickle, glob
+    from datetime import datetime, timedelta
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.common.exceptions import TimeoutException
+    from selenium.webdriver.common.keys import Keys
+    from selenium.webdriver.common.action_chains import ActionChains
+    import io
+    from PIL import Image
+    from urllib.parse import urlparse, parse_qs
+    
+    from __main__ import send_telegram_message, download_from_drive_link, logger, TOKEN
+    
+    def log_progress(text, send_to_telegram=True):
+        logger.info(f"[JAZZDRIVE] {text}")
+        if send_to_telegram:
+            send_telegram_message(chat_id, f"<b>{text}</b>")
+    
+    def send_telegram_api(method, data):
+        """Send request to Telegram API"""
+        try:
+            response = requests.post(
+                f"https://api.telegram.org/bot{TOKEN}/{method}",
+                json=data,
+                timeout=10
+            )
+            return response.json()
+        except Exception as e:
+            logger.error(f"[TELEGRAM API] Error: {e}")
+            return None
+    
+    def edit_message_text(chat_id, message_id, text, reply_markup=None):
+        """Edit a message"""
+        data = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+            "parse_mode": "HTML"
+        }
+        if reply_markup:
+            data["reply_markup"] = reply_markup
+        return send_telegram_api("editMessageText", data)
+    
+    def send_message(chat_id, text, reply_markup=None):
+        """Send a message"""
+        data = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML"
+        }
+        if reply_markup:
+            data["reply_markup"] = reply_markup
+        return send_telegram_api("sendMessage", data)
+    
+    def answer_callback_query(callback_query_id, text=None, show_alert=False):
+        """Answer a callback query"""
+        data = {
+            "callback_query_id": callback_query_id
+        }
+        if text:
+            data["text"] = text
+        if show_alert:
+            data["show_alert"] = show_alert
+        return send_telegram_api("answerCallbackQuery", data)
+    
+    def take_screenshot(driver):
+        """Take screenshot and send to Telegram"""
+        try:
+            screenshot = driver.get_screenshot_as_png()
+            image = Image.open(io.BytesIO(screenshot))
+            
+            # Create a new image with white background
+            new_image = Image.new('RGB', image.size, 'white')
+            new_image.paste(image, (0, 0))
+            
+            img_byte_arr = io.BytesIO()
+            new_image.save(img_byte_arr, format='PNG')
+            img_byte_arr.seek(0)
+            
+            # Send to Telegram
+            files = {'photo': ('screenshot.png', img_byte_arr, 'image/png')}
+            data = {'chat_id': chat_id, 'caption': '📸 JazzDrive Login Screenshot'}
+            response = requests.post(f"https://api.telegram.org/bot{TOKEN}/sendPhoto", 
+                                   files=files, data=data)
+            return True
+        except Exception as e:
+            log_progress(f"⚠️ Failed to take screenshot: {e}", False)
+            return False
+    
+    # ============================================
+    # SESSION STATE MANAGEMENT
+    # ============================================
+    
+    def get_session_state():
+        """Get current login state from context"""
+        if context_data:
+            return context_data.get('jazz_login_state', 'not_started')
+        return 'not_started'
+    
+    def set_session_state(state):
+        """Set login state in context"""
+        if context_data:
+            context_data['jazz_login_state'] = state
+    
+    def get_session_driver():
+        """Get driver from context"""
+        if context_data:
+            return context_data.get('jazz_driver')
+        return None
+    
+    def set_session_driver(driver):
+        """Set driver in context"""
+        if context_data:
+            context_data['jazz_driver'] = driver
+    
+    def get_session_phone():
+        """Get phone from context"""
+        if context_data:
+            return context_data.get('jazz_phone')
+        return None
+    
+    def set_session_phone(phone):
+        """Set phone in context"""
+        if context_data:
+            context_data['jazz_phone'] = phone
+    
+    def clear_session_data():
+        """Clear all session data"""
+        if context_data:
+            keys_to_remove = ['jazz_login_state', 'jazz_driver', 'jazz_phone', 
+                             'jazz_otp_attempted', 'jazz_setup']
+            for key in keys_to_remove:
+                context_data.pop(key, None)
+    
+    # ============================================
+    # GOOGLE DRIVE SESSION STORAGE
+    # ============================================
+    
+    def get_session_gdrive_id():
+        """Get session file ID from Google Drive"""
+        return "18YJ1eFlnodIxn72YSQ_6PaLUmCZ2DQmu"
+    
+    def save_session_to_drive(driver):
+        """Save session cookies to Google Drive"""
+        try:
+            cookies = driver.get_cookies()
+            session_data = {
+                'cookies': cookies,
+                'expires': (datetime.now() + timedelta(hours=24)).timestamp(),
+                'saved_at': datetime.now().timestamp()
+            }
+            
+            temp_file = os.path.join(tempfile.gettempdir(), f"jazz_session_{int(time.time())}.pkl")
+            with open(temp_file, 'wb') as f:
+                pickle.dump(session_data, f)
+            
+            log_progress("💾 Saving session to Google Drive...", True)
+            
+            from googleapiclient.http import MediaFileUpload
+            from googleapiclient.discovery import build
+            from google.oauth2.credentials import Credentials
+            
+            from __main__ import download_drive_token
+            token_data, _ = download_drive_token()
+            
+            if token_data:
+                creds = Credentials(token=token_data['token'])
+                service = build('drive', 'v3', credentials=creds)
+                
+                results = service.files().list(
+                    q=f"name='jazzdrive_session.pkl'",
+                    spaces='drive',
+                    fields='files(id, name)'
+                ).execute()
+                
+                file_metadata = {
+                    'name': 'jazzdrive_session.pkl',
+                    'parents': ['root']
+                }
+                
+                media = MediaFileUpload(temp_file, mimetype='application/octet-stream')
+                
+                if results.get('files'):
+                    file_id = results['files'][0]['id']
+                    service.files().update(
+                        fileId=file_id,
+                        media_body=media
+                    ).execute()
+                else:
+                    service.files().create(
+                        body=file_metadata,
+                        media_body=media,
+                        fields='id'
+                    ).execute()
+                
+                log_progress("✅ Session saved to Google Drive", True)
+                
+            os.remove(temp_file)
+            return True
+                
+        except Exception as e:
+            log_progress(f"❌ Failed to save session: {e}", False)
+            return False
+    
+    def load_session_from_drive():
+        """Load session cookies from Google Drive"""
+        try:
+            log_progress("🔄 Loading session from Google Drive...", True)
+            
+            from googleapiclient.discovery import build
+            from google.oauth2.credentials import Credentials
+            
+            from __main__ import download_drive_token
+            token_data, _ = download_drive_token()
+            
+            if not token_data:
+                log_progress("❌ No Google Drive token", False)
+                return None
+            
+            creds = Credentials(token=token_data['token'])
+            service = build('drive', 'v3', credentials=creds)
+            
+            results = service.files().list(
+                q=f"name='jazzdrive_session.pkl'",
+                spaces='drive',
+                fields='files(id, name)'
+            ).execute()
+            
+            if not results.get('files'):
+                log_progress("⚠️ No session file found on Google Drive", False)
+                return None
+            
+            file_id = results['files'][0]['id']
+            
+            temp_file = os.path.join(tempfile.gettempdir(), "jazz_session_temp.pkl")
+            request = service.files().get_media(fileId=file_id)
+            
+            with open(temp_file, 'wb') as f:
+                f.write(request.execute())
+            
+            with open(temp_file, 'rb') as f:
+                session_data = pickle.load(f)
+            
+            if datetime.now().timestamp() > session_data['expires']:
+                log_progress("⚠️ Session expired", False)
+                os.remove(temp_file)
+                return None
+            
+            os.remove(temp_file)
+            
+            log_progress("✅ Session loaded from Google Drive", True)
+            return session_data
+                
+        except Exception as e:
+            log_progress(f"❌ Failed to load session: {e}", False)
+            return None
+    
+    # ============================================
+    # JAZZDRIVE CORE FUNCTIONS
+    # ============================================
+    
+    def setup_driver():
+        """Setup Chrome driver for JazzDrive"""
+        log_progress("🚀 Setting up Chrome driver...", False)
+        
+        chrome_options = Options()
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--headless=new")
+        chrome_options.add_argument("--window-size=1920,1080")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        
+        try:
+            driver = webdriver.Chrome(options=chrome_options)
+            driver.implicitly_wait(10)
+            return driver
+        except Exception as e:
+            log_progress(f"❌ Failed to setup driver: {e}", True)
+            return None
+    
+    def is_logged_in(driver):
+        """Check if already logged in to JazzDrive"""
+        try:
+            driver.get("https://cloud.jazzdrive.com.pk/#gallery")
+            time.sleep(3)
+            current_url = driver.current_url.lower()
+            
+            if "login" in current_url or "signin" in current_url:
+                return False
+            
+            if "gallery" in current_url or "cloud" in current_url or "highlights" in current_url:
+                try:
+                    user_elements = driver.find_elements(By.XPATH, 
+                        "//*[contains(text(), 'Welcome') or contains(text(), 'Logout') or contains(text(), 'Upload')]")
+                    if user_elements:
+                        return True
+                except:
+                    pass
+                return True
+            return False
+        except Exception as e:
+            log_progress(f"⚠️ Login check failed: {e}", False)
+            return False
+    
+    def jazzdrive_login_with_phone(driver, phone_number):
+        """First step of JazzDrive login: Enter phone number"""
+        try:
+            driver.get("https://cloud.jazzdrive.com.pk/login")
+            time.sleep(3)
+            
+            take_screenshot(driver)
+            
+            phone_input = WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.ID, "msisdn"))
+            )
+            phone_input.clear()
+            phone_input.send_keys(phone_number)
+            
+            continue_button = WebDriverWait(driver, 20).until(
+                EC.element_to_be_clickable((By.ID, "signinbtn"))
+            )
+            continue_button.click()
+            time.sleep(3)
+            
+            take_screenshot(driver)
+            
+            try:
+                otp_elements = driver.find_elements(By.XPATH, 
+                    "//*[contains(text(), 'verification') or contains(text(), 'OTP') or contains(text(), 'code') or @type='tel' or @type='text' or @type='number']")
+                if otp_elements:
+                    log_progress("📲 OTP page loaded successfully", True)
+                    return True
+                else:
+                    log_progress("⚠️ Not redirected to OTP page", True)
+                    return False
+            except:
+                log_progress("⚠️ Could not verify OTP page", True)
+                return False
+                    
+        except Exception as e:
+            log_progress(f"❌ Phone login error: {str(e)[:200]}", True)
+            return False
+    
+    def jazzdrive_login_with_otp(driver, otp):
+        """Second step of JazzDrive login: Enter OTP"""
+        try:
+            log_progress(f"🔢 Entering OTP: {otp}", True)
+            
+            success = False
+            otp_inputs = driver.find_elements(By.XPATH, 
+                "//input[@type='tel' or @type='text' or @type='number' and (@maxlength='1' or @size='1')]")
+            
+            if len(otp_inputs) >= 4:
+                for i, digit in enumerate(otp[:4]):
+                    try:
+                        otp_inputs[i].send_keys(digit)
+                        time.sleep(0.2)
+                    except:
+                        pass
+                success = True
+            else:
+                otp_inputs = driver.find_elements(By.XPATH, 
+                    "//input[contains(@placeholder, 'OTP') or contains(@placeholder, 'code') or contains(@placeholder, 'verification')]")
+                
+                if otp_inputs:
+                    otp_inputs[0].send_keys(otp)
+                    success = True
+                else:
+                    actions = ActionChains(driver)
+                    actions.send_keys(otp)
+                    actions.perform()
+                    success = True
+            
+            time.sleep(1)
+            
+            submit_buttons = driver.find_elements(By.XPATH, 
+                "//button[contains(text(), 'Submit') or contains(text(), 'Verify') or contains(text(), 'Login') or @type='submit']")
+            
+            if submit_buttons:
+                submit_buttons[0].click()
+            else:
+                actions = ActionChains(driver)
+                actions.send_keys(Keys.ENTER)
+                actions.perform()
+            
+            time.sleep(5)
+            
+            take_screenshot(driver)
+            
+            current_url = driver.current_url.lower()
+            if "login" not in current_url and "signin" not in current_url:
+                if "cloud.jazzdrive.com.pk" in current_url:
+                    save_session_to_drive(driver)
+                    log_progress("✅ Login successful! Session saved.", True)
+                    return "success"
+            
+            error_elements = driver.find_elements(By.XPATH,
+                "//*[contains(text(), 'error') or contains(text(), 'invalid') or contains(text(), 'wrong') or contains(text(), 'incorrect')]")
+            
+            if error_elements:
+                error_msg = error_elements[0].text[:100]
+                log_progress(f"❌ OTP error: {error_msg}", True)
+                return "invalid_otp"
+            
+            log_progress("⚠️ Login status unclear", True)
+            return "unknown"
+                    
+        except Exception as e:
+            log_progress(f"❌ OTP entry error: {str(e)[:200]}", True)
+            return "error"
+    
+    def upload_to_jazzdrive(driver, file_path):
+        """Upload file to JazzDrive"""
+        if not os.path.exists(file_path):
+            log_progress("❌ File not found", True)
+            return False
+        
+        file_size = os.path.getsize(file_path) / (1024 * 1024)  # MB
+        log_progress(f"📤 Uploading {os.path.basename(file_path)} ({file_size:.1f} MB)...", True)
+        
+        # Calculate upload time based on file size
+        if file_size < 100:
+            expected_time = 60  # 1 minute
+        elif file_size < 200:
+            expected_time = 120  # 2 minutes
+        elif file_size < 500:
+            expected_time = 300  # 5 minutes
+        else:
+            expected_time = 600  # 10 minutes
+        
+        try:
+            driver.get("https://cloud.jazzdrive.com.pk/#gallery")
+            time.sleep(3)
+            
+            try:
+                upload_input = WebDriverWait(driver, 20).until(
+                    EC.presence_of_element_located((By.ID, "uploadInputField"))
+                )
+            except:
+                upload_input = WebDriverWait(driver, 20).until(
+                    EC.presence_of_element_located((By.XPATH, "//input[@type='file']"))
+                )
+            
+            driver.execute_script("arguments[0].style.display = 'block';", upload_input)
+            driver.execute_script("arguments[0].style.visibility = 'visible';", upload_input)
+            driver.execute_script("arguments[0].style.opacity = '1';", upload_input)
+            time.sleep(2)
+            
+            upload_input.send_keys(os.path.abspath(file_path))
+            log_progress("📁 File selected, starting upload...", True)
+            
+            start_time = time.time()
+            upload_success = False
+            last_progress = 0
+            
+            # Wait for upload
+            while time.time() - start_time < expected_time + 120:  # +120 seconds buffer
+                try:
+                    success_elements = driver.find_elements(By.XPATH,
+                        "//*[contains(text(), 'upload completed') or contains(text(), 'upload successful') or contains(text(), 'completed') or contains(text(), 'successfully') or contains(text(), '100%')]")
+                    
+                    if success_elements:
+                        upload_success = True
+                        log_progress("✅ Upload confirmed successful!", True)
+                    
+                    progress_elements = driver.find_elements(By.XPATH,
+                        "//*[contains(text(), '%') or contains(text(), 'uploading') or contains(text(), 'Uploading')]")
+                    
+                    if progress_elements:
+                        for element in progress_elements:
+                            text = element.text.lower()
+                            if '%' in text:
+                                match = re.search(r'(\d+)%', text)
+                                if match:
+                                    progress = int(match.group(1))
+                                    if progress > last_progress:
+                                        log_progress(f"📊 Upload progress: {progress}%", True)
+                                        last_progress = progress
+                    
+                    error_elements = driver.find_elements(By.XPATH,
+                        "//*[contains(text(), 'error') or contains(text(), 'failed') or contains(text(), 'invalid') or contains(text(), 'cannot')]")
+                    
+                    if error_elements:
+                        error_msg = error_elements[0].text[:100]
+                        log_progress(f"⚠️ Upload error detected: {error_msg}", True)
+                    
+                except:
+                    pass
+                
+                time.sleep(5)
+                
+                elapsed = time.time() - start_time
+                if int(elapsed) % 30 == 0:
+                    log_progress(f"⏳ Still uploading... ({int(elapsed)}s elapsed, waiting {expected_time}s total)", True)
+            
+            total_time = int(time.time() - start_time)
+            log_progress(f"✅ Upload completed! (waited {total_time}s total)", True)
+            return True
+            
+        except Exception as e:
+            log_progress(f"❌ Upload failed: {str(e)[:200]}", True)
+            return False
+    
+    # ============================================
+    # FAST LINK EXTRACTION FUNCTION - OPTIMIZED
+    # ============================================
+    
+    def get_jazzdrive_links(driver, file_path):
+        """Extract share and direct download links from JazzDrive - OPTIMIZED VERSION"""
+        if not os.path.exists(file_path):
+            return None
+        
+        filename = os.path.basename(file_path)
+        log_progress(f"🔗 Extracting links for: {filename}", True)
+        
+        start_time = time.time()
+        
+        try:
+            # Determine target page based on file type
+            ext = filename.split('.')[-1].lower()
+            is_media = ext in ['jpg', 'jpeg', 'png', 'gif', 'mp4', 'mov', 'avi', 'mkv']
+            
+            target_url = "https://cloud.jazzdrive.com.pk/#gallery" if is_media else "https://cloud.jazzdrive.com.pk/#files"
+            
+            # Go to target page - REDUCED WAIT
+            driver.get(target_url)
+            time.sleep(3)  # Reduced from 5
+            
+            # QUICK search for file - MAX 15 SECONDS TOTAL
+            max_search_time = 15
+            search_start = time.time()
+            file_element = None
+            
+            while time.time() - search_start < max_search_time:
+                try:
+                    # Try search immediately
+                    search_inputs = driver.find_elements(By.XPATH, 
+                        "//input[contains(@placeholder, 'Search') or contains(@placeholder, 'search')]")
+                    
+                    if search_inputs:
+                        search_box = search_inputs[0]
+                        search_box.clear()
+                        # Search with partial filename for speed
+                        search_text = filename[:20] if len(filename) > 20 else filename
+                        search_box.send_keys(search_text)
+                        search_box.send_keys(Keys.ENTER)
+                        time.sleep(2)  # Reduced from 5
+                    
+                    # Look for file with multiple quick selectors
+                    selectors = [
+                        f"//*[contains(text(), '{filename[:15]}')]",  # Partial match
+                        f"//*[contains(@title, '{filename[:15]}')]",
+                        "//*[contains(@class, 'item')][1]",  # First item
+                        "//*[contains(@class, 'file')][1]",
+                        "//*[contains(@class, 'grid-item')][1]"
+                    ]
+                    
+                    for selector in selectors:
+                        elements = driver.find_elements(By.XPATH, selector)
+                        if elements:
+                            file_element = elements[0]
+                            break
+                    
+                    if file_element:
+                        break
+                        
+                except Exception as e:
+                    pass
+                
+                time.sleep(1)  # Reduced from 2-5
+            
+            if not file_element:
+                log_progress("⚠️ File not found quickly, trying alternative...", True)
+                # Try one more time with different approach
+                driver.get(target_url)
+                time.sleep(2)
+                # Just take first file item
+                file_elements = driver.find_elements(By.XPATH, "//*[contains(@class, 'item') or contains(@class, 'file')]")
+                if file_elements:
+                    file_element = file_elements[0]
+                else:
+                    log_progress("❌ Could not find file element", True)
+                    return None
+            
+            # Get share link - FAST
+            try:
+                # Right-click to open context menu
+                actions = ActionChains(driver)
+                actions.context_click(file_element).perform()
+                time.sleep(1.5)  # Reduced from 3
+                
+                # Click Share option - multiple quick selectors
+                share_selectors = [
+                    "//*[contains(text(), 'Share')][1]",
+                    "//button[contains(., 'Share')][1]",
+                    "//*[contains(@class, 'share')][1]"
+                ]
+                
+                share_option = None
+                for selector in share_selectors:
+                    elements = driver.find_elements(By.XPATH, selector)
+                    if elements:
+                        share_option = elements[0]
+                        break
+                
+                if not share_option:
+                    log_progress("⚠️ No Share option found", True)
+                    return None
+                
+                share_option.click()
+                time.sleep(2)  # Reduced from 5
+                
+                # Get share link quickly
+                share_link = None
+                link_selectors = [
+                    "//input[contains(@value, 'cloud.jazzdrive.com.pk')]",
+                    "//input[starts-with(@value, 'https://cloud.jazzdrive')]",
+                    "//input[@type='text' and contains(@value, 'http')]"
+                ]
+                
+                for selector in link_selectors:
+                    inputs = driver.find_elements(By.XPATH, selector)
+                    if inputs:
+                        share_link = inputs[0].get_attribute("value")
+                        if share_link and share_link.startswith('http'):
+                            break
+                
+                if not share_link:
+                    log_progress("⚠️ Could not extract share link", True)
+                    return None
+                
+                # Get direct link - USING WORKING LOGIC BUT FASTER
+                direct_link = None
+                main_window = driver.current_window_handle
+                
+                try:
+                    # Open share link in new tab - QUICK
+                    driver.execute_script(f"window.open('{share_link}', '_blank');")
+                    time.sleep(2)  # Reduced from 5
+                    
+                    # Switch to new tab
+                    new_window = [w for w in driver.window_handles if w != main_window][0]
+                    driver.switch_to.window(new_window)
+                    
+                    # Quick accept cookies if present
+                    try:
+                        accept_all = driver.find_elements(By.XPATH, 
+                            "//button[contains(text(), 'Accept') or contains(text(), 'Allow') or contains(text(), 'AGREE')]")
+                        if accept_all:
+                            accept_all[0].click()
+                            time.sleep(0.5)
+                    except:
+                        pass
+                    
+                    # Find download button quickly
+                    download_selectors = [
+                        "//button[@aria-label='Download']",
+                        "//button[contains(text(), 'Download')][1]",
+                        "//a[contains(text(), 'Download')][1]"
+                    ]
+                    
+                    for selector in download_selectors:
+                        buttons = driver.find_elements(By.XPATH, selector)
+                        if buttons:
+                            try:
+                                driver.execute_script("arguments[0].click();", buttons[0])
+                            except:
+                                buttons[0].click()
+                            time.sleep(1.5)  # Reduced from 3
+                            break
+                    
+                    # Look for download iframe - USING WORKING LOGIC
+                    iframes = driver.find_elements(By.TAG_NAME, "iframe")
+                    for iframe in iframes:
+                        src = iframe.get_attribute("src")
+                        # EXACT PATTERN THAT WORKED BEFORE
+                        if src and "sapi/download/video" in src:
+                            direct_link = src
+                            break
+                        elif src and "download" in src and "video" in src:
+                            direct_link = src
+                            break
+                        elif src and "sapi/download" in src and "action=get" in src:
+                            direct_link = src
+                            break
+                    
+                    # If no iframe, check page source quickly
+                    if not direct_link:
+                        try:
+                            page_source = driver.page_source
+                            # EXACT REGEX PATTERNS THAT WORKED BEFORE
+                            patterns = [
+                                r'https?://cloud\.jazzdrive\.com\.pk/sapi/download/video\?[^"\']+',
+                                r'src=["\'][^"\']*sapi/download/video[^"\']*["\']',
+                                r'https?://[^"\']*sapi/download/[^"\']*video[^"\']*'
+                            ]
+                            for pattern in patterns:
+                                matches = re.findall(pattern, page_source, re.IGNORECASE)
+                                if matches:
+                                    for match in matches:
+                                        if "thumbnail" not in match:
+                                            direct_link = match.replace('src="', '').replace('"', '').replace("src='", "").replace("'", "")
+                                            break
+                                    if direct_link:
+                                        break
+                        except:
+                            pass
+                    
+                    # Close tab and return
+                    driver.close()
+                    driver.switch_to.window(main_window)
+                    
+                except Exception as e:
+                    log_progress(f"⚠️ Direct link extraction error: {e}", False)
+                    # Ensure we're back in main window
+                    if len(driver.window_handles) > 1:
+                        driver.switch_to.window(driver.window_handles[0])
+                
+                elapsed_time = int(time.time() - start_time)
+                log_progress(f"✅ Links extracted in {elapsed_time} seconds", True)
+                
+                return {
+                    "share": share_link,
+                    "direct": direct_link
+                }
+                
+            except Exception as e:
+                log_progress(f"❌ Link extraction failed: {str(e)[:200]}", True)
+                return None
+            
+        except Exception as e:
+            log_progress(f"❌ Link extraction process failed: {str(e)[:200]}", True)
+            return None
+    
+    # ============================================
+    # DOWNLOAD FUNCTIONS
+    # ============================================
+    
+    def download_direct_url(url):
+        """Download direct URL files"""
+        try:
+            temp_dir = tempfile.gettempdir()
+            temp_file = os.path.join(temp_dir, f"jazz_direct_{int(time.time())}.tmp")
+            
+            log_progress(f"⬇️ Downloading direct URL for JazzDrive...", True)
+            
+            response = requests.get(url, stream=True, timeout=300)
+            response.raise_for_status()
+            
+            filename = None
+            if 'Content-Disposition' in response.headers:
+                content_disp = response.headers['Content-Disposition']
+                if 'filename=' in content_disp:
+                    filename = content_disp.split('filename=')[1].strip('"\'').split(';')[0]
+            
+            if not filename:
+                parsed = urlparse(url)
+                filename = os.path.basename(parsed.path)
+                if not filename or '.' not in filename:
+                    filename = f"jazzdrive_file_{int(time.time())}.bin"
+            
+            final_path = os.path.join(temp_dir, filename)
+            
+            with open(temp_file, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            
+            os.rename(temp_file, final_path)
+            
+            file_size = os.path.getsize(final_path) / (1024 * 1024)
+            log_progress(f"✅ Direct download complete! ({file_size:.2f} MB)", True)
+            return final_path
+            
+        except Exception as e:
+            log_progress(f"❌ Download error: {str(e)}", True)
+            return None
+    
+    def download_youtube_video(url):
+        """Download YouTube video"""
+        try:
+            log_progress("⬇️ Downloading YouTube video for JazzDrive...", True)
+            
+            temp_dir = tempfile.gettempdir()
+            output_file = os.path.join(temp_dir, f"jazz_youtube_{int(time.time())}.mp4")
+            
+            ydl_opts = {
+                'outtmpl': output_file,
+                'format': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]',
+                'merge_output_format': 'mp4',
+                'quiet': True,
+                'no_warnings': True,
+                'retries': 3,
+                'fragment_retries': 3,
+                'skip_unavailable_fragments': True,
+                'continuedl': True,
+                'noprogress': True,
+                'concurrent_fragment_downloads': 2,
+                'http_chunk_size': 1048576,
+            }
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                
+                # Find the downloaded file
+                downloaded_file = None
+                for file in os.listdir(temp_dir):
+                    filepath = os.path.join(temp_dir, file)
+                    if os.path.isfile(filepath):
+                        if any(filepath.lower().endswith(ext) for ext in ['.mp4', '.mkv', '.webm', '.mov']):
+                            file_age = time.time() - os.path.getmtime(filepath)
+                            if file_age < 300:
+                                downloaded_file = filepath
+                                break
+                
+                if downloaded_file and os.path.exists(downloaded_file):
+                    file_size = os.path.getsize(downloaded_file) / (1024 * 1024)
+                    log_progress(f"✅ YouTube download complete! ({file_size:.2f} MB)", True)
+                    return downloaded_file
+                else:
+                    log_progress("❌ Downloaded file not found", True)
+                    return None
+                    
+        except Exception as e:
+            log_progress(f"❌ YouTube download error: {str(e)}", True)
+            return None
+    
+    # ============================================
+    # MAIN LOGIN PROCESS
+    # ============================================
+    
+    def process_jazzdrive_login(phone=None, otp=None):
+        """Main login process with proper flow control"""
+        
+        current_state = get_session_state()
+        driver = get_session_driver()
+        stored_phone = get_session_phone()
+        
+        log_progress(f"🔍 Login state: {current_state}", False)
+        
+        if phone and not driver:
+            log_progress("🚀 Starting fresh login process...", True)
+            
+            driver = setup_driver()
+            if not driver:
+                return "driver_error"
+            
+            set_session_driver(driver)
+            set_session_phone(phone)
+            
+            if jazzdrive_login_with_phone(driver, phone):
+                set_session_state("otp_required")
+                return "otp_required"
+            else:
+                clear_session_data()
+                return "phone_error"
+        
+        elif otp and driver and current_state == "otp_required":
+            log_progress(f"🔢 Processing OTP with existing driver...", True)
+            
+            result = jazzdrive_login_with_otp(driver, otp)
+            
+            if result == "success":
+                set_session_state("logged_in")
+                return "logged_in"
+            elif result == "invalid_otp":
+                return "invalid_otp"
+            else:
+                clear_session_data()
+                return "otp_error"
+        
+        elif current_state == "logged_in" and driver:
+            if is_logged_in(driver):
+                return "already_logged_in"
+            else:
+                clear_session_data()
+                return "session_expired"
+        
+        else:
+            log_progress(f"⚠️ Invalid login state: {current_state}", True)
+            clear_session_data()
+            return "invalid_state"
+    
+    # ============================================
+    # MAIN EXECUTION
+    # ============================================
+    
+    try:
+        # Check if callback query
+        if callback_query:
+            callback_data = callback_query.get('data', '')
+            callback_id = callback_query.get('id', '')
+            
+            answer_callback_query(callback_id, "JazzDrive callback", False)
+            return "callback_handled"
+        
+        # Normal flow: start JazzDrive process
+        if not url:
+            # Login/OTP submission
+            if context_data:
+                phone = context_data.get('jazz_phone')
+                otp = context_data.get('jazz_otp')
+                
+                log_progress(f"📱 Login attempt - Phone: {phone}, OTP: {otp}", False)
+                
+                if phone and not otp:
+                    result = process_jazzdrive_login(phone=phone)
+                    
+                    if result == "otp_required":
+                        send_message(chat_id, "<b>📲 OTP sent to your phone. Please enter the 4-digit OTP:</b>")
+                        return "waiting_otp"
+                    elif result == "phone_error":
+                        send_message(chat_id, "<b>❌ Failed to send OTP. Please check phone number and try /jazzdrive_login again.</b>")
+                        clear_session_data()
+                        return "error"
+                    else:
+                        send_message(chat_id, f"<b>❌ Login error: {result}</b>")
+                        clear_session_data()
+                        return "error"
+                
+                elif phone and otp:
+                    result = process_jazzdrive_login(otp=otp)
+                    
+                    if result == "logged_in":
+                        send_message(chat_id, "<b>✅ Login successful! Session saved to Google Drive.</b>\n\nNow send me a URL to upload to JazzDrive:")
+                        return "logged_in"
+                    elif result == "invalid_otp":
+                        send_message(chat_id, "<b>❌ Invalid OTP. Please enter the correct 4-digit OTP:</b>")
+                        context_data.pop('jazz_otp', None)
+                        return "waiting_otp"
+                    elif result == "already_logged_in":
+                        send_message(chat_id, "<b>✅ Already logged in!</b>\n\nNow send me a URL to upload to JazzDrive:")
+                        return "logged_in"
+                    else:
+                        send_message(chat_id, f"<b>❌ Login failed: {result}</b>\n\nPlease try /jazzdrive_login again.")
+                        clear_session_data()
+                        return "error"
+                
+                else:
+                    send_message(chat_id, "<b>📱 Please enter your Jazz mobile number (03XXXXXXXXX):</b>")
+                    return "waiting_phone"
+            
+            return "setup_required"
+        
+        # URL provided - process upload
+        log_progress(f"🎬 Starting JazzDrive upload for: {url[:80]}...", True)
+        
+        # Check if logged in
+        current_state = get_session_state()
+        driver = get_session_driver()
+        
+        if current_state == "logged_in" and driver and is_logged_in(driver):
+            log_progress("✅ Using existing logged in session", True)
+        else:
+            session_data = load_session_from_drive()
+            if session_data:
+                driver = setup_driver()
+                if not driver:
+                    send_message(chat_id, "<b>❌ Failed to setup browser.</b>")
+                    return "error"
+                
+                driver.get("https://cloud.jazzdrive.com.pk/")
+                driver.delete_all_cookies()
+                
+                for cookie in session_data['cookies']:
+                    try:
+                        if 'domain' in cookie and cookie['domain'].startswith('.'):
+                            cookie['domain'] = cookie['domain'][1:]
+                        driver.add_cookie(cookie)
+                    except:
+                        pass
+                
+                driver.refresh()
+                time.sleep(3)
+                
+                if is_logged_in(driver):
+                    log_progress("✅ Logged in with saved session from Google Drive", True)
+                    set_session_driver(driver)
+                    set_session_state("logged_in")
+                else:
+                    log_progress("⚠️ Saved session expired or invalid", True)
+                    send_message(chat_id, "<b>⚠️ Session expired. Please login with /jazzdrive_login</b>")
+                    driver.quit()
+                    return "needs_login"
+            else:
+                send_message(chat_id, "<b>⚠️ Please login first with /jazzdrive_login</b>")
+                return "needs_login"
+        
+        # Download based on URL type
+        is_youtube = 'youtube.com' in url or 'youtu.be' in url
+        
+        if is_youtube:
+            send_message(chat_id, "<b>⬇️ Downloading YouTube video for JazzDrive...</b>")
+            downloaded_file = download_youtube_video(url)
+        else:
+            send_message(chat_id, "<b>⬇️ Downloading file for JazzDrive...</b>")
+            downloaded_file = download_direct_url(url)
+        
+        if not downloaded_file:
+            send_message(chat_id, "<b>❌ Failed to download file.</b>")
+            return "error"
+        
+        # Upload to JazzDrive
+        send_message(chat_id, "<b>📤 Uploading to JazzDrive...</b>")
+        
+        if upload_to_jazzdrive(driver, downloaded_file):
+            # Get share and direct links
+            send_message(chat_id, "<b>🔗 Extracting download links...</b>")
+            links = get_jazzdrive_links(driver, downloaded_file)
+            
+            file_size = os.path.getsize(downloaded_file) / (1024 * 1024)
+            filename = os.path.basename(downloaded_file)
+            
+            if links:
+                share_link = links.get("share")
+                direct_link = links.get("direct")
+                
+                success_msg = f"""
+<b>✅ Successfully uploaded to JazzDrive!</b>
+
+📄 <b>File:</b> {filename}
+📦 <b>Size:</b> {file_size:.2f} MB
+
+🔗 <b>Share Link:</b>
+{share_link}
+                """
+                
+                if direct_link:
+                    success_msg += f"\n📥 <b>Direct Download:</b>\n{direct_link}"
+                else:
+                    success_msg += f"\n⚠️ <i>Could not extract direct download link</i>"
+                
+                send_message(chat_id, success_msg)
+            else:
+                # Fallback if links not extracted
+                success_msg = f"""
+<b>✅ Successfully uploaded to JazzDrive!</b>
+
+📄 <b>File:</b> {filename}
+📦 <b>Size:</b> {file_size:.2f} MB
+☁️ <b>Storage:</b> JazzDrive Cloud
+
+💡 <b>Access at:</b> https://cloud.jazzdrive.com.pk
+                """
+                send_message(chat_id, success_msg)
+        else:
+            send_message(chat_id, "<b>❌ Failed to upload to JazzDrive.</b>")
+        
+        # Clean up
+        try:
+            os.remove(downloaded_file)
+        except:
+            pass
+        
+        return "completed"
+        
+    except Exception as e:
+        logger.error(f"[JAZZDRIVE] Fatal error: {e}")
+        import traceback
+        log_progress(f"❌ Error traceback: {traceback.format_exc()[:500]}", False)
+        send_message(chat_id, f"<b>❌ JazzDrive Error:</b> {str(e)[:200]}")
+        
+        if 'driver' in locals():
+            try:
+                driver.quit()
+            except:
+                pass
+        
+        return "error"
+
+# ============================================
+# SUPPORT FUNCTIONS FOR MAIN SCRIPT
+# ============================================
+
+def start_jazzdrive_upload(url, chat_id):
+    """Start JazzDrive upload"""
+    return task7_upload_to_jazzdrive(url, chat_id)
+
+def handle_jazzdrive_callback(callback_data, callback_query_id, chat_id, message_id, context_data):
+    """Handle JazzDrive callback"""
+    callback_query = {
+        'data': callback_data,
+        'id': callback_query_id
+    }
+    return task7_upload_to_jazzdrive(None, chat_id, context_data, callback_query)
+
+def jazzdrive_login_setup(chat_id, context_data, phone=None, otp=None):
+    """Setup JazzDrive login"""
+    if phone:
+        context_data['jazz_phone'] = phone
+    if otp:
+        context_data['jazz_otp'] = otp
+    
+    context_data['jazz_setup'] = True
+    return task7_upload_to_jazzdrive(None, chat_id, context_data)

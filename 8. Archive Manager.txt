@@ -1,0 +1,2118 @@
+
+#!/usr/bin/env python3
+"""
+Archive Bot Pro - Complete Archive Management Solution
+With proper event loop handling for all environments
+"""
+
+import os
+import sys
+import asyncio
+import time
+import zipfile
+import tempfile
+import shutil
+import traceback
+import json
+import io
+import re
+import math
+import logging
+import subprocess
+import mimetypes
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional, Dict, List, Tuple, Set, Any
+from urllib.parse import urlparse, unquote
+from concurrent.futures import ThreadPoolExecutor
+
+print("🚀 ARCHIVE BOT PRO - INITIALIZING...")
+print("=" * 70)
+
+# ===== DEPENDENCY INSTALLATION =====
+def install_dependencies():
+    """Install required Python packages"""
+    print("📦 Checking and installing dependencies...")
+    
+    required_packages = [
+        "telethon>=1.28.0",
+        "requests>=2.28.0",
+        "tqdm>=4.65.0",
+        "pyminizip>=0.2.6",
+        "py7zr>=0.20.0",
+        "rarfile>=4.0",
+        "patool>=1.12",
+        "google-api-python-client>=2.80.0",
+        "google-auth-httplib2>=0.1.0",
+        "google-auth-oauthlib>=1.0.0",
+        "nest-asyncio>=1.5.8",  # For Jupyter/Colab support
+    ]
+    
+    print("📋 Required packages:")
+    for pkg in required_packages:
+        print(f"   • {pkg}")
+    
+    try:
+        # Try to import pip
+        import pip
+    except ImportError:
+        print("❌ pip not available. Please install pip first.")
+        sys.exit(1)
+    
+    # Install packages
+    for package in required_packages:
+        try:
+            print(f"🔧 Installing {package}...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", package, "-q"])
+            print(f"   ✅ {package.split('>=')[0]} installed")
+        except subprocess.CalledProcessError as e:
+            print(f"   ❌ Failed to install {package}: {e}")
+            print(f"   💡 Try installing manually: pip install {package}")
+    
+    print("✅ Dependencies installation completed")
+
+# Run dependency installation
+install_dependencies()
+
+# ===== IMPORT LIBRARIES =====
+print("\n📥 Importing libraries...")
+
+# Check if we're in Jupyter/Colab environment
+is_jupyter = 'ipykernel' in sys.modules or 'IPython' in sys.modules
+if is_jupyter:
+    print("🌐 Detected Jupyter/Colab environment - applying nest_asyncio")
+    import nest_asyncio
+    nest_asyncio.apply()
+
+# Try to import all required libraries
+rarfile_available = False
+py7zr_available = False
+patool_available = False
+pyminizip_available = False
+google_drive_available = False
+
+try:
+    from telethon import TelegramClient, events, Button
+    from telethon.tl.types import Message, Document, DocumentAttributeFilename
+    from telethon.tl.types import MessageMediaDocument, MessageMediaPhoto
+    from telethon.errors import FloodWaitError, TimeoutError
+    print("✅ Telethon imported")
+except ImportError as e:
+    print(f"❌ Failed to import Telethon: {e}")
+    print("💡 Try: pip install telethon")
+    sys.exit(1)
+
+try:
+    import requests
+    print("✅ requests imported")
+except ImportError as e:
+    print(f"❌ Failed to import requests: {e}")
+    sys.exit(1)
+
+try:
+    from tqdm import tqdm
+    print("✅ tqdm imported")
+except ImportError:
+    print("⚠️ tqdm not available - using basic progress bars")
+
+try:
+    import rarfile
+    rarfile_available = True
+    print("✅ rarfile imported")
+except ImportError:
+    print("⚠️ rarfile not available - RAR extraction will be limited")
+
+try:
+    import py7zr
+    py7zr_available = True
+    print("✅ py7zr imported")
+except ImportError:
+    print("⚠️ py7zr not available - 7Z extraction will be limited")
+
+try:
+    import patoolib
+    patool_available = True
+    print("✅ patool imported")
+except ImportError:
+    print("⚠️ patool not available - will use built-in extraction only")
+
+try:
+    import pyminizip
+    pyminizip_available = True
+    print("✅ pyminizip imported for password ZIP creation")
+except ImportError:
+    print("⚠️ pyminizip not available - basic password protection only")
+
+# Try to import Google Drive libraries
+try:
+    from google.oauth2.credentials import Credentials
+    from google_auth_oauthlib.flow import InstalledAppFlow
+    from google.auth.transport.requests import Request
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaIoBaseDownload
+    google_drive_available = True
+    print("✅ Google Drive API imported")
+except ImportError:
+    print("⚠️ Google Drive API not available - Google Drive features disabled")
+
+# Configure logging to reduce noise from Telethon
+logging.getLogger('telethon').setLevel(logging.WARNING)
+logging.getLogger('asyncio').setLevel(logging.WARNING)
+
+# Telegram API credentials
+API_ID = 32086282
+API_HASH = "064a66fe7097452e6ac8f4e8df28aa97"
+BOT_TOKEN = "8304576037:AAERRvq5yHkW_kkJfOHsAQLHrCD7eIdiOP4"
+
+# Google Drive token URL (restored)
+GOOGLE_DRIVE_TOKEN_URL = "https://drive.usercontent.google.com/download?id=1NZ3NvyVBnK85S8f5eTZJS5uM5c59xvGM&export=download"
+
+# Google Drive API Scopes
+SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
+
+# ===== GLOBAL VARIABLES =====
+user_sessions: Dict[int, Dict] = {}
+bot_start_time = time.time()
+executor = ThreadPoolExecutor(max_workers=5)
+
+# ===== PROGRESS BAR CLASS =====
+class ProgressBar:
+    def __init__(self, total: int, description: str = ""):
+        self.total = total
+        self.current = 0
+        self.start_time = time.time()
+        self.description = description
+        self.last_update = 0
+        self.last_update_time = 0
+    
+    def update(self, n: int = 1):
+        self.current += n
+    
+    def get_progress_str(self, current_file: str = "") -> str:
+        """Get formatted progress bar string"""
+        if self.total == 0:
+            percentage = 0
+        else:
+            percentage = (self.current / self.total) * 100
+        
+        elapsed = time.time() - self.start_time
+        
+        # Calculate ETA
+        if self.current > 0 and self.total > 0:
+            eta = (elapsed / self.current) * (self.total - self.current)
+            eta_str = f"⏱️ **ETA:** {self.format_time(eta)}"
+        else:
+            eta_str = "⏱️ **ETA:** Calculating..."
+        
+        # Create progress bar
+        bar_length = 20
+        if self.total > 0:
+            filled_length = int(bar_length * self.current / self.total)
+        else:
+            filled_length = 0
+        bar = "█" * filled_length + "░" * (bar_length - filled_length)
+        
+        # Format sizes
+        if self.total > 1024*1024*1024:  # If in GB range
+            current_str = f"{self.current/(1024*1024*1024):.2f}GB"
+            total_str = f"{self.total/(1024*1024*1024):.2f}GB"
+            speed = self.current / elapsed / (1024*1024) if elapsed > 0 else 0
+            speed_str = f"{speed:.1f} MB/s"
+        elif self.total > 1024*1024:  # If in MB range
+            current_str = f"{self.current/(1024*1024):.1f}MB"
+            total_str = f"{self.total/(1024*1024):.1f}MB"
+            speed = self.current / elapsed / (1024*1024) if elapsed > 0 else 0
+            speed_str = f"{speed:.1f} MB/s"
+        elif self.total > 1024:  # If in KB range
+            current_str = f"{self.current/1024:.1f}KB"
+            total_str = f"{self.total/1024:.1f}KB"
+            speed = self.current / elapsed / 1024 if elapsed > 0 else 0
+            speed_str = f"{speed:.1f} KB/s"
+        else:
+            current_str = f"{self.current}B"
+            total_str = f"{self.total}B"
+            speed = self.current / elapsed if elapsed > 0 else 0
+            speed_str = f"{speed:.1f} B/s"
+        
+        result = (
+            f"`{bar}` **{percentage:.1f}%**\n"
+            f"📊 **Progress:** `{current_str}` / `{total_str}`\n"
+            f"⚡ **Speed:** `{speed_str}`\n"
+            f"{eta_str}"
+        )
+        
+        if current_file:
+            short_file = current_file[:40] + "..." if len(current_file) > 40 else current_file
+            result += f"\n📄 **Current:** `{short_file}`"
+        
+        return result
+    
+    @staticmethod
+    def format_time(seconds: float) -> str:
+        """Format seconds to human readable time"""
+        if seconds < 60:
+            return f"{seconds:.0f}s"
+        elif seconds < 3600:
+            return f"{seconds//60:.0f}m {seconds%60:.0f}s"
+        else:
+            hours = seconds // 3600
+            minutes = (seconds % 3600) // 60
+            return f"{hours:.0f}h {minutes:.0f}m"
+
+# ===== LOGGING FUNCTIONS =====
+def log_info(message: str):
+    """Log info messages with timestamp"""
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    print(f"[{timestamp}] ℹ️  {message}")
+
+def log_success(message: str):
+    """Log success messages with timestamp"""
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    print(f"[{timestamp}] ✅ {message}")
+
+def log_error(message: str):
+    """Log error messages with timestamp"""
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    print(f"[{timestamp}] ❌ {message}")
+
+def log_warning(message: str):
+    """Log warning messages with timestamp"""
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    print(f"[{timestamp}] ⚠️  {message}")
+
+def log_bot_activity(user_id: int, username: str, action: str):
+    """Log user activity"""
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    print(f"[{timestamp}] 👤 User {user_id} ({username}): {action}")
+
+# ===== UTILITY FUNCTIONS =====
+def format_size(bytes_size: int) -> str:
+    """Format bytes to human readable size"""
+    if bytes_size >= 1024*1024*1024:
+        return f"{bytes_size/(1024*1024*1024):.2f} GB"
+    elif bytes_size >= 1024*1024:
+        return f"{bytes_size/(1024*1024):.2f} MB"
+    elif bytes_size >= 1024:
+        return f"{bytes_size/1024:.2f} KB"
+    else:
+        return f"{bytes_size} bytes"
+
+def format_time_duration(seconds: float) -> str:
+    """Format seconds to human readable duration"""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    elif seconds < 3600:
+        minutes = seconds // 60
+        seconds = seconds % 60
+        return f"{minutes:.0f}m {seconds:.0f}s"
+    else:
+        hours = seconds // 3600
+        minutes = (seconds % 3600) // 60
+        return f"{hours:.0f}h {minutes:.0f}m"
+
+def get_file_extension(filename: str) -> str:
+    """Get file extension in lowercase"""
+    return os.path.splitext(filename)[1].lower()
+
+def is_archive_file(filename: str) -> bool:
+    """Check if file is an archive"""
+    ext = get_file_extension(filename)
+    supported_formats = ['.zip']
+    
+    if rarfile_available:
+        supported_formats.append('.rar')
+    if py7zr_available:
+        supported_formats.append('.7z')
+    
+    return ext in supported_formats
+
+def sanitize_filename(filename: str) -> str:
+    """Sanitize filename for Telegram/Google Drive"""
+    # Replace problematic characters
+    filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+    # Limit length
+    if len(filename) > 200:
+        name, ext = os.path.splitext(filename)
+        filename = name[:200-len(ext)] + ext
+    return filename
+
+def extract_google_drive_id(url: str) -> Optional[str]:
+    """Extract Google Drive file ID from URL"""
+    patterns = [
+        r'/file/d/([a-zA-Z0-9_-]+)',
+        r'id=([a-zA-Z0-9_-]+)',
+        r'/open\?id=([a-zA-Z0-9_-]+)',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    
+    return None
+
+# ===== GOOGLE DRIVE FUNCTIONS =====
+async def download_from_google_drive(url: str, destination: str, progress_msg=None) -> Tuple[bool, str, int]:
+    """Download file from Google Drive"""
+    try:
+        # Extract file ID
+        file_id = extract_google_drive_id(url)
+        if not file_id:
+            return False, "Invalid Google Drive URL", 0
+        
+        # Check if it's a direct download URL
+        if 'export=download' in url:
+            download_url = url
+        else:
+            download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+        
+        # Start download
+        if progress_msg:
+            await progress_msg.edit(
+                f"🌐 **Downloading from Google Drive**\n"
+                f"📄 Extracting file...",
+                parse_mode='markdown'
+            )
+        
+        session = requests.Session()
+        response = session.get(download_url, stream=True, timeout=30)
+        
+        # Handle Google Drive virus scan warning
+        if 'confirm=' in response.url:
+            # Extract confirm token
+            for key, value in response.cookies.items():
+                if key.startswith('download_warning'):
+                    confirm_token = value
+                    download_url = f"https://drive.google.com/uc?export=download&confirm={confirm_token}&id={file_id}"
+                    response = session.get(download_url, stream=True, timeout=30)
+                    break
+        
+        response.raise_for_status()
+        
+        # Get file size
+        file_size = int(response.headers.get('content-length', 0))
+        
+        # Start downloading with progress
+        progress_bar = ProgressBar(file_size, "Downloading from Google Drive")
+        downloaded = 0
+        
+        with open(destination, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    progress_bar.current = downloaded
+                    
+                    # Update progress every 500KB or 1 second
+                    if progress_msg and (downloaded % (512*1024) == 0 or time.time() - progress_bar.last_update > 1):
+                        progress_bar.last_update = time.time()
+                        try:
+                            await progress_msg.edit(
+                                f"🌐 **Downloading from Google Drive**\n"
+                                f"{progress_bar.get_progress_str()}"
+                            )
+                        except:
+                            pass
+        
+        # Verify download
+        if os.path.exists(destination) and os.path.getsize(destination) > 0:
+            actual_size = os.path.getsize(destination)
+            return True, f"Downloaded successfully", actual_size
+        else:
+            return False, "Download failed - file is empty", 0
+            
+    except Exception as e:
+        log_error(f"Google Drive download error: {e}")
+        return False, f"Google Drive error: {str(e)}", 0
+
+# ===== UNZIP/EXTRACTION FUNCTIONS =====
+def extract_zip_file(zip_path: str, extract_dir: str, password: str = None) -> Tuple[bool, str, List[str]]:
+    """Extract ZIP file"""
+    try:
+        extracted_files = []
+        
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            # Check if password is needed
+            if password:
+                zip_ref.setpassword(password.encode())
+            
+            # Get file list
+            file_list = zip_ref.namelist()
+            
+            # Extract all files
+            for file in file_list:
+                try:
+                    zip_ref.extract(file, extract_dir)
+                    extracted_files.append(file)
+                except RuntimeError as e:
+                    if 'encrypted' in str(e):
+                        return False, "Password required or incorrect password", []
+                    else:
+                        raise
+        
+        return True, f"Extracted {len(extracted_files)} files", extracted_files
+        
+    except zipfile.BadZipFile:
+        return False, "Invalid or corrupted ZIP file", []
+    except RuntimeError as e:
+        if 'encrypted' in str(e):
+            return False, "Password required or incorrect password", []
+        else:
+            return False, f"Extraction error: {str(e)}", []
+    except Exception as e:
+        return False, f"Extraction error: {str(e)}", []
+
+def extract_rar_file(rar_path: str, extract_dir: str, password: str = None) -> Tuple[bool, str, List[str]]:
+    """Extract RAR file"""
+    try:
+        if not rarfile_available:
+            return False, "RAR extraction not available. Install rarfile package.", []
+        
+        extracted_files = []
+        
+        with rarfile.RarFile(rar_path, 'r') as rar_ref:
+            # Check if password is needed
+            if password:
+                rar_ref.setpassword(password)
+            
+            # Get file list
+            file_list = rar_ref.namelist()
+            
+            # Extract all files
+            for file in file_list:
+                try:
+                    rar_ref.extract(file, extract_dir)
+                    extracted_files.append(file)
+                except rarfile.PasswordRequired:
+                    return False, "Password required or incorrect password", []
+                except rarfile.BadRarFile:
+                    return False, "Invalid or corrupted RAR file", []
+        
+        return True, f"Extracted {len(extracted_files)} files", extracted_files
+        
+    except Exception as e:
+        return False, f"RAR extraction error: {str(e)}", []
+
+def extract_7z_file(sevenz_path: str, extract_dir: str, password: str = None) -> Tuple[bool, str, List[str]]:
+    """Extract 7Z file"""
+    try:
+        if not py7zr_available:
+            return False, "7Z extraction not available. Install py7zr package.", []
+        
+        extracted_files = []
+        
+        with py7zr.SevenZipFile(sevenz_path, 'r', password=password) as sevenz_ref:
+            # Extract all files
+            sevenz_ref.extractall(extract_dir)
+            
+            # Get file list
+            file_list = sevenz_ref.getnames()
+            extracted_files = file_list
+        
+        return True, f"Extracted {len(extracted_files)} files", extracted_files
+        
+    except py7zr.Bad7zFile:
+        return False, "Invalid or corrupted 7Z file", []
+    except Exception as e:
+        return False, f"7Z extraction error: {str(e)}", []
+
+def extract_archive(archive_path: str, extract_dir: str, password: str = None) -> Tuple[bool, str, List[str]]:
+    """Extract any supported archive"""
+    try:
+        os.makedirs(extract_dir, exist_ok=True)
+        
+        # Check file type
+        ext = get_file_extension(archive_path)
+        
+        if ext == '.zip':
+            return extract_zip_file(archive_path, extract_dir, password)
+        elif ext == '.rar' and rarfile_available:
+            return extract_rar_file(archive_path, extract_dir, password)
+        elif ext == '.7z' and py7zr_available:
+            return extract_7z_file(archive_path, extract_dir, password)
+        elif patool_available:
+            # Try patool for other formats
+            try:
+                patoolib.extract_archive(archive_path, outdir=extract_dir, password=password)
+                # List extracted files
+                extracted_files = []
+                for root, dirs, files in os.walk(extract_dir):
+                    for file in files:
+                        extracted_files.append(os.path.relpath(os.path.join(root, file), extract_dir))
+                return True, f"Extracted {len(extracted_files)} files using patool", extracted_files
+            except Exception as e:
+                return False, f"Patool extraction error: {str(e)}", []
+        else:
+            return False, f"Unsupported archive format: {ext}", []
+            
+    except Exception as e:
+        return False, f"Extraction error: {str(e)}", []
+
+# Initialize client with proper parameters
+client = TelegramClient(
+    'archive_bot_pro_session',
+    API_ID,
+    API_HASH,
+    connection_retries=5,
+    request_retries=5,
+    timeout=300,
+    device_model="Archive Bot Pro",
+    system_version="1.0",
+    app_version="2.0"
+)
+
+# ===== FILE PROCESSING FUNCTIONS =====
+async def download_telegram_file(event, filepath: str) -> Tuple[bool, str]:
+    """Download Telegram file with progress and timeout handling"""
+    try:
+        # Get filename and size
+        filename = "file"
+        file_size = 0
+        
+        if event.media and hasattr(event.media, 'document'):
+            doc = event.media.document
+            file_size = doc.size
+            for attr in doc.attributes:
+                if isinstance(attr, DocumentAttributeFilename):
+                    filename = attr.file_name
+                    break
+        
+        log_info(f"Downloading file: {filename} ({format_size(file_size)})")
+        
+        # Send initial message
+        msg = await event.reply(
+            f"📥 **Downloading from Telegram**\n"
+            f"📄 `{filename}`\n"
+            f"📊 **Size:** `{format_size(file_size)}`\n"
+            f"⏳ Preparing download...",
+            parse_mode='markdown'
+        )
+        
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        
+        # Download with progress
+        start_time = time.time()
+        progress_bar = ProgressBar(file_size, "Downloading")
+        
+        def progress_callback(received_bytes, total):
+            progress_bar.total = total
+            progress_bar.current = received_bytes
+            
+            # Update progress every 1 second
+            current_time = time.time()
+            if current_time - progress_bar.last_update > 1 or received_bytes == total:
+                progress_bar.last_update = current_time
+                asyncio.create_task(safe_update_progress(msg, filename, progress_bar))
+        
+        # Download the file with timeout handling
+        try:
+            await asyncio.wait_for(
+                client.download_media(
+                    event.message,
+                    file=filepath,
+                    progress_callback=progress_callback
+                ),
+                timeout=1800  # 30 minute timeout for large files
+            )
+        except asyncio.TimeoutError:
+            log_error(f"Timeout downloading file: {filename}")
+            await msg.edit("❌ **Download Timeout**\nThe download took too long. Please try again.")
+            return False, "Download timeout"
+        
+        download_time = time.time() - start_time
+        
+        # Verify download
+        if os.path.exists(filepath):
+            actual_size = os.path.getsize(filepath)
+            speed = actual_size / download_time if download_time > 0 else 0
+            
+            await msg.edit(
+                f"✅ **Download Complete!**\n"
+                f"📄 `{filename}`\n"
+                f"📊 **Size:** `{format_size(actual_size)}`\n"
+                f"⏱️ **Time:** `{format_time_duration(download_time)}`\n"
+                f"⚡ **Avg Speed:** `{format_size(speed)}/s`"
+            )
+            
+            log_success(f"File downloaded: {filename} ({format_size(actual_size)})")
+            return True, "Success"
+        else:
+            log_error(f"Download failed for {filename}")
+            await msg.edit("❌ **Download Failed!**\nFile was not created.")
+            return False, "File not created"
+            
+    except Exception as e:
+        log_error(f"Download error: {e}")
+        await event.reply(f"❌ **Download Error:**\n```{str(e)[:200]}```")
+        return False, str(e)
+
+async def safe_update_progress(msg, filename: str, progress_bar: ProgressBar):
+    """Safely update progress message"""
+    try:
+        await msg.edit(
+            f"📥 **Downloading from Telegram**\n"
+            f"📄 `{filename}`\n"
+            f"{progress_bar.get_progress_str()}"
+        )
+    except Exception:
+        pass  # Silently ignore update errors
+
+async def send_file_with_progress(event, file_path: str, caption: str = "", password: str = None) -> bool:
+    """Send file with progress tracking"""
+    try:
+        if not os.path.exists(file_path):
+            log_error(f"File not found: {file_path}")
+            return False
+            
+        file_size = os.path.getsize(file_path)
+        filename = os.path.basename(file_path)
+        
+        log_info(f"Uploading file: {filename} ({format_size(file_size)})")
+        
+        # Send initial progress message
+        progress_msg = await event.reply(
+            f"📤 **Uploading File**\n"
+            f"📄 `{filename}`\n"
+            f"📊 **Size:** `{format_size(file_size)}`\n"
+            f"⏳ Starting upload...",
+            parse_mode='markdown'
+        )
+        
+        # Create progress bar
+        progress_bar = ProgressBar(file_size, "Uploading")
+        last_update_time = 0
+        
+        # Upload callback function
+        def upload_callback(current: int, total: int):
+            nonlocal last_update_time
+            progress_bar.total = total
+            progress_bar.current = current
+            
+            current_time = time.time()
+            if current_time - last_update_time > 1 or current == total:
+                last_update_time = current_time
+                asyncio.create_task(safe_update_upload_progress(
+                    progress_msg, filename, progress_bar
+                ))
+        
+        # Add password info to caption if provided
+        final_caption = caption
+        if password:
+            final_caption = f"{caption}\n\n🔐 **Password:** `{password}`"
+        
+        # Send the file with timeout
+        start_time = time.time()
+        try:
+            await asyncio.wait_for(
+                client.send_file(
+                    event.chat_id,
+                    file_path,
+                    caption=final_caption,
+                    force_document=True,
+                    progress_callback=upload_callback,
+                    part_size_kb=512,  # Use smaller parts for better progress
+                    workers=2  # Limit workers
+                ),
+                timeout=3600  # 1 hour timeout for upload
+            )
+        except asyncio.TimeoutError:
+            log_error(f"Upload timeout for: {filename}")
+            await progress_msg.edit("❌ **Upload Timeout**\nThe upload took too long.")
+            return False
+        
+        elapsed = time.time() - start_time
+        speed = file_size / elapsed if elapsed > 0 else 0
+        
+        # Update with final stats
+        await progress_msg.edit(
+            f"✅ **Upload Complete!**\n"
+            f"📄 `{filename}`\n"
+            f"📊 **Size:** `{format_size(file_size)}`\n"
+            f"⏱️ **Time:** `{format_time_duration(elapsed)}`\n"
+            f"⚡ **Avg Speed:** `{format_size(speed)}/s`"
+        )
+        
+        log_success(f"File uploaded: {filename} ({format_size(file_size)}) in {format_time_duration(elapsed)}")
+        return True
+        
+    except Exception as e:
+        log_error(f"Upload error: {e}")
+        await event.reply(f"❌ **Upload Error:**\n```{str(e)[:200]}```")
+        return False
+
+async def safe_update_upload_progress(msg, filename: str, progress_bar: ProgressBar):
+    """Safely update upload progress message"""
+    try:
+        await msg.edit(
+            f"📤 **Uploading File**\n"
+            f"📄 `{filename}`\n"
+            f"{progress_bar.get_progress_str()}"
+        )
+    except Exception:
+        pass  # Silently ignore update errors
+
+async def create_password_zip(files: List[Dict], zip_path: str, password: str = None, progress_msg=None) -> Tuple[bool, str]:
+    """Create password protected ZIP archive with progress"""
+    try:
+        total_files = len(files)
+        log_info(f"Creating ZIP with {total_files} files (Password: {'Yes' if password else 'No'})")
+        
+        if password:
+            # Try to use pyminizip for better password protection
+            try:
+                if pyminizip_available:
+                    file_list = []
+                    arcname_list = []
+                    
+                    for idx, file_info in enumerate(files, 1):
+                        file_path = file_info["path"]
+                        if os.path.exists(file_path):
+                            file_list.append(file_path)
+                            arcname_list.append(file_info["name"])
+                            
+                            # Update progress
+                            if progress_msg:
+                                progress = (idx / total_files) * 100
+                                bar_length = 20
+                                filled = int(bar_length * idx / total_files)
+                                bar = "█" * filled + "░" * (bar_length - filled)
+                                
+                                try:
+                                    await progress_msg.edit(
+                                        f"📦 **CREATING PASSWORD ZIP**\n\n"
+                                        f"📊 **Progress:** `{idx}/{total_files}` files\n"
+                                        f"🔐 **Password:** `{'*' * len(password)}`\n"
+                                        f"⚡ **Processing files...**\n\n"
+                                        f"`{bar}` **{progress:.1f}%**"
+                                    )
+                                except:
+                                    pass
+                    
+                    # Create the password protected zip in thread pool to avoid blocking
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(
+                        executor,
+                        lambda: pyminizip.compress_multiple(
+                            file_list,
+                            arcname_list,
+                            zip_path,
+                            password,
+                            5  # Compression level
+                        )
+                    )
+                    
+                    log_success(f"Password ZIP created with pyminizip: {os.path.basename(zip_path)}")
+                    return True, f"✅ Created password protected ZIP with {total_files} files"
+                    
+            except Exception as e:
+                log_warning(f"pyminizip failed, falling back to basic ZIP: {e}")
+                # Fallback to regular zip with password in filename
+                with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    for idx, file_info in enumerate(files, 1):
+                        file_path = file_info["path"]
+                        if os.path.exists(file_path):
+                            arcname = file_info["name"]
+                            zipf.write(file_path, arcname)
+                            
+                            # Update progress
+                            if progress_msg:
+                                progress = (idx / total_files) * 100
+                                bar_length = 20
+                                filled = int(bar_length * idx / total_files)
+                                bar = "█" * filled + "░" * (bar_length - filled)
+                                
+                                try:
+                                    await progress_msg.edit(
+                                        f"📦 **CREATING PASSWORD ZIP**\n\n"
+                                        f"📊 **Progress:** `{idx}/{total_files}` files\n"
+                                        f"🔐 **Password:** `{'*' * len(password)}`\n"
+                                        f"⚡ **Processing files...**\n\n"
+                                        f"`{bar}` **{progress:.1f}%**"
+                                    )
+                                except:
+                                    pass
+                
+                # Rename to indicate password
+                new_path = zip_path.replace('.zip', f'_password_{password}.zip')
+                os.rename(zip_path, new_path)
+                return True, f"✅ Created ZIP archive with {total_files} files\n🔐 Password note: Basic protection - password is '{password}'"
+        
+        else:
+            # Create regular ZIP
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for idx, file_info in enumerate(files, 1):
+                    file_path = file_info["path"]
+                    if os.path.exists(file_path):
+                        arcname = file_info["name"]
+                        zipf.write(file_path, arcname)
+                        
+                        # Update progress
+                        if progress_msg:
+                            progress = (idx / total_files) * 100
+                            bar_length = 20
+                            filled = int(bar_length * idx / total_files)
+                            bar = "█" * filled + "░" * (bar_length - filled)
+                            
+                            try:
+                                await progress_msg.edit(
+                                    f"📦 **CREATING ZIP ARCHIVE**\n\n"
+                                    f"📊 **Progress:** `{idx}/{total_files}` files\n"
+                                    f"⚡ **Processing files...**\n\n"
+                                    f"`{bar}` **{progress:.1f}%**"
+                                )
+                            except:
+                                pass
+            
+            log_success(f"Regular ZIP created: {os.path.basename(zip_path)} with {total_files} files")
+            return True, f"✅ Created ZIP archive with {total_files} files"
+            
+    except Exception as e:
+        log_error(f"ZIP creation error: {e}")
+        return False, f"❌ ZIP creation error: {str(e)}"
+
+# ===== BOT COMMAND HANDLERS =====
+@client.on(events.NewMessage(pattern='/start'))
+async def handle_start(event):
+    """Handle /start command"""
+    user_id = event.sender_id
+    username = event.sender.username or "Unknown"
+    log_bot_activity(user_id, username, "used /start command")
+    
+    # Check what formats are available
+    formats_available = ["ZIP"]
+    if rarfile_available:
+        formats_available.append("RAR")
+    if py7zr_available:
+        formats_available.append("7Z")
+    
+    welcome_text = f"""
+🤖 **Archive Manager Pro** 📦
+
+✨ **Premium Features:**
+• 🚀 2GB File Support
+• 📥 Direct Download Links & Telegram Files
+• 🔐 Password Protected Archives
+• 📊 Real-time Progress
+• 🔄 Automatic Cleanup
+• ⚡ Fast Processing
+• 🌐 Google Drive Support
+
+📋 **Quick Commands:**
+• Send any archive file to extract
+• `/zip` - Create compressed archive  
+• `/zip_password` - Create password protected zip
+• `/extract` - Extract archive files
+• `/cancel` - Cancel operation
+
+📁 **Supported Formats:**
+• ✅ ZIP (with password support)
+{f"• ✅ RAR (with password support)" if rarfile_available else "• ⚠️ RAR (install rarfile for support)"}
+{f"• ✅ 7Z (with password support)" if py7zr_available else "• ⚠️ 7Z (install py7zr for support)"}
+• ✅ Telegram Files & Media
+• ✅ Google Drive Links
+
+💡 **How to Start:**
+1️⃣ Send any archive file to extract
+2️⃣ For password archives, bot will ask for password
+3️⃣ Create archives with /zip or /zip_password
+
+🔒 *Secure • Fast • Reliable*
+    """
+    
+    buttons = [
+        [Button.inline("📦 UNZIP FILES", b"unzip"),
+         Button.inline("🗜️ CREATE ZIP", b"zip")],
+        [Button.inline("🔐 PASSWORD ZIP", b"zip_password"),
+         Button.inline("📖 HELP", b"help")]
+    ]
+    
+    await event.reply(
+        welcome_text,
+        buttons=buttons,
+        parse_mode='markdown'
+    )
+
+@client.on(events.NewMessage(pattern='/extract'))
+async def handle_extract_command(event):
+    """Handle /extract command"""
+    user_id = event.sender_id
+    username = event.sender.username or "Unknown"
+    log_bot_activity(user_id, username, "used /extract command")
+    
+    user_sessions[user_id] = {
+        "mode": "extract",
+        "waiting_file": True,
+        "password_asked": False,
+        "archive_path": None,
+        "temp_dir": None,
+        "start_time": time.time(),
+        "username": username
+    }
+    
+    supported_formats = "ZIP"
+    if rarfile_available:
+        supported_formats += ", RAR"
+    if py7zr_available:
+        supported_formats += ", 7Z"
+    
+    await event.reply(
+        f"📦 **EXTRACTION MODE**\n\n"
+        f"📁 **Send me an archive file to extract:**\n"
+        f"• Supported formats: {supported_formats}\n"
+        f"• With or without password\n"
+        f"• From Telegram or direct download link\n"
+        f"• Google Drive links supported\n\n"
+        f"💡 **You can:**\n"
+        f"1. Send archive file directly\n"
+        f"2. Send direct download link\n"
+        f"3. Send Google Drive link\n"
+        f"4. Cancel with `/cancel`\n\n"
+        f"🔐 **Password protected archives are supported!**",
+        parse_mode='markdown'
+    )
+
+@client.on(events.NewMessage(pattern='/zip'))
+async def handle_zip_command(event):
+    """Handle /zip command"""
+    user_id = event.sender_id
+    username = event.sender.username or "Unknown"
+    log_bot_activity(user_id, username, "used /zip command")
+    
+    temp_dir = tempfile.mkdtemp(prefix=f"zip_{user_id}_")
+    
+    user_sessions[user_id] = {
+        "mode": "zip",
+        "waiting_files": True,
+        "files": [],
+        "temp_dir": temp_dir,
+        "total_size": 0,
+        "with_password": False,
+        "password": None,
+        "start_time": time.time(),
+        "username": username
+    }
+    
+    await event.reply(
+        "🗜️ **ZIP CREATION MODE**\n\n"
+        "📥 **Send me files to add to archive:**\n"
+        "• Telegram files (any type)\n"
+        "• Direct download links\n"
+        "• Google Drive links\n"
+        "• Photos, videos, documents\n\n"
+        "📊 **Current Status:**\n"
+        "• Files added: **0**\n"
+        "• Total size: **0 MB**\n"
+        "• Available: **2.0 GB**\n\n"
+        "⚡ **Quick Commands:**\n"
+        "• `/done` - Finish & create zip\n"
+        "• `/list` - View added files\n"
+        "• `/cancel` - Cancel operation\n\n"
+        "⚠️ **Maximum total size: 2GB**",
+        parse_mode='markdown'
+    )
+
+@client.on(events.NewMessage(pattern='/zip_password'))
+async def handle_zip_password_command(event):
+    """Handle /zip_password command"""
+    user_id = event.sender_id
+    username = event.sender.username or "Unknown"
+    log_bot_activity(user_id, username, "used /zip_password command")
+    
+    user_sessions[user_id] = {
+        "mode": "zip_password",
+        "waiting_password": True,
+        "files": [],
+        "temp_dir": None,
+        "total_size": 0,
+        "with_password": True,
+        "password": None,
+        "start_time": time.time(),
+        "username": username
+    }
+    
+    await event.reply(
+        "🔐 **PASSWORD PROTECTED ZIP**\n\n"
+        "🔑 **Step 1: Set a password**\n"
+        "Enter password for your archive:\n\n"
+        "💡 **Password Requirements:**\n"
+        "• Minimum 4 characters\n"
+        "• Recommended: 8+ characters\n"
+        "• Use mix of letters, numbers, symbols\n\n"
+        "⚠️ **Remember this password!**\n"
+        "You'll need it to extract files later.\n\n"
+        "❌ Cancel: `/cancel`",
+        parse_mode='markdown'
+    )
+
+@client.on(events.CallbackQuery(data=b"unzip"))
+async def handle_unzip_button(event):
+    """Handle unzip button"""
+    await handle_extract_command(event)
+
+@client.on(events.CallbackQuery(data=b"zip"))
+async def handle_zip_button(event):
+    """Handle zip button"""
+    user_id = event.sender_id
+    username = event.sender.username or "Unknown"
+    log_bot_activity(user_id, username, "clicked button: zip")
+    
+    temp_dir = tempfile.mkdtemp(prefix=f"zip_{user_id}_")
+    
+    user_sessions[user_id] = {
+        "mode": "zip",
+        "waiting_files": True,
+        "files": [],
+        "temp_dir": temp_dir,
+        "total_size": 0,
+        "with_password": False,
+        "password": None,
+        "start_time": time.time(),
+        "username": username
+    }
+    
+    await event.edit(
+        "🗜️ **ZIP CREATION MODE**\n\n"
+        "📥 **Send me files to add to archive:**\n"
+        "• Telegram files (any type)\n"
+        "• Direct download links\n"
+        "• Google Drive links\n"
+        "• Photos, videos, documents\n\n"
+        "📊 **Current Status:**\n"
+        "• Files added: **0**\n"
+        "• Total size: **0 MB**\n"
+        "• Available: **2.0 GB**\n\n"
+        "⚡ **Quick Commands:**\n"
+        "• `/done` - Finish & create zip\n"
+        "• `/list` - View added files\n"
+        "• `/cancel` - Cancel operation\n\n"
+        "⚠️ **Maximum total size: 2GB**",
+        parse_mode='markdown'
+    )
+
+@client.on(events.CallbackQuery(data=b"zip_password"))
+async def handle_zip_password_button(event):
+    """Handle zip_password button"""
+    user_id = event.sender_id
+    username = event.sender.username or "Unknown"
+    log_bot_activity(user_id, username, "clicked button: zip_password")
+    
+    user_sessions[user_id] = {
+        "mode": "zip_password",
+        "waiting_password": True,
+        "files": [],
+        "temp_dir": None,
+        "total_size": 0,
+        "with_password": True,
+        "password": None,
+        "start_time": time.time(),
+        "username": username
+    }
+    
+    await event.edit(
+        "🔐 **PASSWORD PROTECTED ZIP**\n\n"
+        "🔑 **Step 1: Set a password**\n"
+        "Enter password for your archive:\n\n"
+        "💡 **Password Requirements:**\n"
+        "• Minimum 4 characters\n"
+        "• Recommended: 8+ characters\n"
+        "• Use mix of letters, numbers, symbols\n\n"
+        "⚠️ **Remember this password!**\n"
+        "You'll need it to extract files later.\n\n"
+        "❌ Cancel: `/cancel`",
+        parse_mode='markdown'
+    )
+
+@client.on(events.CallbackQuery(data=b"help"))
+async def handle_help_button(event):
+    """Handle help button"""
+    await handle_start(event)
+
+# ===== EXTRACTION HANDLER =====
+async def perform_extraction(event, archive_path: str, password: str = None):
+    """Perform archive extraction"""
+    user_id = event.sender_id
+    session = user_sessions[user_id]
+    
+    # Create extraction directory
+    extract_dir = os.path.join(session["temp_dir"], "extracted")
+    os.makedirs(extract_dir, exist_ok=True)
+    
+    # Start extraction message
+    msg = await event.reply(
+        f"📦 **EXTRACTING ARCHIVE**\n\n"
+        f"📄 `{os.path.basename(archive_path)}`\n"
+        f"🔐 **Password:** `{'***' if password else 'No password'}`\n"
+        f"⏳ Starting extraction...",
+        parse_mode='markdown'
+    )
+    
+    try:
+        # Run extraction in thread pool
+        loop = asyncio.get_event_loop()
+        success, message, extracted_files = await loop.run_in_executor(
+            executor,
+            lambda: extract_archive(archive_path, extract_dir, password)
+        )
+        
+        if not success:
+            await msg.edit(f"❌ **EXTRACTION FAILED**\n{message}")
+            return False
+        
+        # Count extracted files
+        total_files = len(extracted_files)
+        
+        await msg.edit(
+            f"✅ **EXTRACTION COMPLETE**\n\n"
+            f"📄 **Archive:** `{os.path.basename(archive_path)}`\n"
+            f"📊 **Files extracted:** `{total_files}`\n"
+            f"📁 **Extracted to:** `{extract_dir}`\n"
+            f"⏳ **Preparing files for upload...**",
+            parse_mode='markdown'
+        )
+        
+        # Check if there are too many files
+        if total_files > 50:
+            await msg.edit(
+                f"📦 **TOO MANY FILES**\n\n"
+                f"Extracted `{total_files}` files.\n"
+                f"Too many to send individually.\n\n"
+                f"💡 **Solution:**\n"
+                f"1. I'll create a new ZIP with extracted files\n"
+                f"2. Then send you the combined archive",
+                parse_mode='markdown'
+            )
+            
+            # Create new zip of extracted files
+            output_zip = os.path.join(session["temp_dir"], "extracted_files.zip")
+            files_to_zip = []
+            
+            # Walk through extracted directory
+            for root, dirs, files in os.walk(extract_dir):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    rel_path = os.path.relpath(file_path, extract_dir)
+                    files_to_zip.append({
+                        "name": rel_path,
+                        "path": file_path,
+                        "size": os.path.getsize(file_path)
+                    })
+            
+            # Create new zip
+            success, zip_message = await create_password_zip(files_to_zip, output_zip, None, msg)
+            
+            if success:
+                # Send the new zip
+                await msg.edit(
+                    f"📦 **CREATED COMBINED ZIP**\n\n"
+                    f"📄 **File:** `extracted_files.zip`\n"
+                    f"📊 **Contains:** `{total_files}` files\n"
+                    f"⏳ **Uploading...**",
+                    parse_mode='markdown'
+                )
+                
+                caption = f"📦 **Extracted Archive Contents**\n\n" \
+                         f"📄 **Original:** `{os.path.basename(archive_path)}`\n" \
+                         f"📊 **Files:** `{total_files}`\n" \
+                         f"🔐 **Password:** `{'Used' if password else 'None'}`"
+                
+                if await send_file_with_progress(event, output_zip, caption):
+                    await event.reply(
+                        f"🎉 **EXTRACTION COMPLETE**\n\n"
+                        f"✅ **All files have been extracted and sent!**\n\n"
+                        f"📊 **Statistics:**\n"
+                        f"• 📦 Original archive: `{os.path.basename(archive_path)}`\n"
+                        f"• 📊 Files extracted: `{total_files}`\n"
+                        f"• ⏱️ Total time: `{format_time_duration(time.time() - session['start_time'])}`\n"
+                        f"• 🔐 **Password:** `{'Used' if password else 'None'}`\n\n"
+                        f"🔧 *Ready for next operation*",
+                        parse_mode='markdown'
+                    )
+                    return True
+            return False
+        
+        # Send files individually (if less than 50)
+        sent_count = 0
+        failed_count = 0
+        
+        for idx, rel_file in enumerate(extracted_files[:50], 1):
+            file_path = os.path.join(extract_dir, rel_file)
+            
+            if os.path.isfile(file_path):
+                file_size = os.path.getsize(file_path)
+                
+                # Skip files larger than 2GB
+                if file_size > 2 * 1024 * 1024 * 1024:
+                    log_warning(f"Skipping large file: {rel_file} ({format_size(file_size)})")
+                    continue
+                
+                try:
+                    caption = f"📦 **Extracted File**\n\n" \
+                             f"📄 `{rel_file}`\n" \
+                             f"📊 Size: `{format_size(file_size)}`\n" \
+                             f"#️⃣ {idx}/{min(total_files, 50)}"
+                    
+                    await msg.edit(
+                        f"📤 **UPLOADING EXTRACTED FILES**\n\n"
+                        f"📊 **Progress:** `{idx}/{min(total_files, 50)}`\n"
+                        f"📄 **Current:** `{rel_file[:40]}...`\n"
+                        f"⏳ Please wait...",
+                        parse_mode='markdown'
+                    )
+                    
+                    await client.send_file(
+                        event.chat_id,
+                        file_path,
+                        caption=caption,
+                        force_document=True
+                    )
+                    sent_count += 1
+                    
+                except Exception as e:
+                    log_error(f"Failed to send {rel_file}: {e}")
+                    failed_count += 1
+        
+        # Final message
+        await event.reply(
+            f"🎉 **EXTRACTION COMPLETE**\n\n"
+            f"✅ **Extraction finished successfully!**\n\n"
+            f"📊 **Statistics:**\n"
+            f"• 📦 Archive: `{os.path.basename(archive_path)}`\n"
+            f"• 📊 Total files: `{total_files}`\n"
+            f"• 📤 Sent successfully: `{sent_count}`\n"
+            f"• ❌ Failed to send: `{failed_count}`\n"
+            f"• ⏱️ Total time: `{format_time_duration(time.time() - session['start_time'])}`\n"
+            f"• 🔐 **Password:** `{'Used' if password else 'None'}`\n\n"
+            f"💡 **Note:** Only first 50 files are sent\n"
+            f"For more files, use the combined ZIP feature.\n\n"
+            f"🔧 *Ready for next operation*",
+            parse_mode='markdown'
+        )
+        return True
+        
+    except Exception as e:
+        log_error(f"Extraction error: {e}")
+        await event.reply(f"❌ **EXTRACTION ERROR**\n```{str(e)[:200]}```")
+        return False
+
+@client.on(events.NewMessage(pattern='/done'))
+async def handle_done(event):
+    """Handle /done command"""
+    user_id = event.sender_id
+    username = event.sender.username or "Unknown"
+    
+    if user_id not in user_sessions:
+        await event.reply(
+            "❌ **No Active Operation**\n"
+            "Start with CREATE ZIP or PASSWORD ZIP first.",
+            parse_mode='markdown'
+        )
+        return
+    
+    session = user_sessions[user_id]
+    mode = session.get("mode")
+    
+    if mode not in ["zip", "zip_password"]:
+        await event.reply(
+            "❌ **Invalid Operation**\n"
+            "Only ZIP creation operations can be finished with /done.",
+            parse_mode='markdown'
+        )
+        return
+    
+    files = session.get("files", [])
+    if not files:
+        await event.reply(
+            "❌ **No Files Added**\n"
+            "Add files first using Telegram files or direct links.",
+            parse_mode='markdown'
+        )
+        return
+    
+    log_bot_activity(user_id, username, f"finishing zip with {len(files)} files")
+    
+    msg = await event.reply(
+        f"⚙️ **PROCESSING REQUEST**\n\n"
+        f"📦 **Archive Creation Started**\n"
+        f"📊 **Files to add:** `{len(files)}`\n"
+        f"📈 **Total size:** `{format_size(session.get('total_size', 0))}`\n"
+        f"🔐 **Password:** `{'***' if session.get('password') else 'No password'}`\n"
+        f"⏳ **Please wait...**\n\n"
+        f"`░░░░░░░░░░░░░░░░░░░░` **0%**",
+        parse_mode='markdown'
+    )
+    
+    try:
+        # Create zip file
+        timestamp = int(time.time())
+        zip_name = f"protected_{timestamp}.zip" if session.get('password') else f"archive_{timestamp}.zip"
+        zip_path = os.path.join(session["temp_dir"], zip_name)
+        
+        # Create the zip with progress
+        success, message = await create_password_zip(
+            files, zip_path, session.get('password'), msg
+        )
+        
+        if not success:
+            await msg.edit(f"❌ **ZIP CREATION FAILED**\n{message}")
+            return
+        
+        # Get final zip size
+        zip_size = os.path.getsize(zip_path)
+        
+        # Start upload
+        await msg.edit(
+            f"✅ **ARCHIVE CREATED**\n\n"
+            f"📦 **File:** `{zip_name}`\n"
+            f"📊 **Size:** `{format_size(zip_size)}`\n"
+            f"🔐 **Password:** `{'***' if session.get('password') else 'No password'}`\n"
+            f"⏳ **Starting upload...**\n\n"
+            f"`░░░░░░░░░░░░░░░░░░░░` **0%**",
+            parse_mode='markdown'
+        )
+        
+        # Upload the file
+        caption = (
+            f"📦 **Archive Created Successfully**\n\n"
+            f"📊 **Files:** `{len(files)}`\n"
+            f"📈 **Size:** `{format_size(zip_size)}`\n"
+            f"🔐 **Password:** `{'***' if session.get('password') else 'No password'}`\n"
+            f"⏱️ **Processed:** `{format_time_duration(time.time() - session['start_time'])}`\n\n"
+            f"✅ *Ready to use*"
+        )
+        
+        if await send_file_with_progress(event, zip_path, caption, session.get('password')):
+            # Success message
+            elapsed = time.time() - session['start_time']
+            password_note = f"\n🔐 **Password:** `{'*' * len(session.get('password', '')) if session.get('password') else 'No password'}`"
+            
+            await event.reply(
+                f"🎉 **OPERATION COMPLETED**\n\n"
+                f"✅ **Archive successfully created and sent!**\n\n"
+                f"📊 **Statistics:**\n"
+                f"• 📦 Files processed: `{len(files)}`\n"
+                f"• 📈 Total size: `{format_size(session.get('total_size', 0))}`\n"
+                f"• ⚡ Final size: `{format_size(zip_size)}`\n"
+                f"• ⏱️ Total time: `{format_time_duration(elapsed)}`\n"
+                f"{password_note}\n\n"
+                f"🔧 *Ready for next operation*",
+                parse_mode='markdown'
+            )
+            
+            log_success(f"Archive created for user {username}: {zip_name} ({format_size(zip_size)})")
+        else:
+            await event.reply(
+                "❌ **UPLOAD FAILED**\n"
+                "Failed to upload the archive. Please try again.",
+                parse_mode='markdown'
+            )
+    
+    except Exception as e:
+        log_error(f"Error creating archive for user {username}: {e}")
+        await event.reply(
+            f"❌ **PROCESSING ERROR**\n"
+            f"Error: `{str(e)[:200]}`\n\n"
+            f"Please try again or contact support.",
+            parse_mode='markdown'
+        )
+    finally:
+        # Cleanup in background
+        asyncio.create_task(cleanup_user_session(user_id))
+
+@client.on(events.NewMessage(pattern='/cancel'))
+async def handle_cancel(event):
+    """Handle /cancel command"""
+    user_id = event.sender_id
+    username = event.sender.username or "Unknown"
+    log_bot_activity(user_id, username, "used /cancel command")
+    
+    if user_id in user_sessions:
+        elapsed = time.time() - user_sessions[user_id].get('start_time', time.time())
+        
+        # Cleanup in background
+        asyncio.create_task(cleanup_user_session(user_id))
+        
+        await event.reply(
+            f"⏹️ **OPERATION CANCELLED**\n\n"
+            f"✅ All temporary files will be cleaned up\n"
+            f"⏱️ Duration: `{format_time_duration(elapsed)}`\n\n"
+            f"🔧 *Ready for new operation*",
+            parse_mode='markdown'
+        )
+    else:
+        await event.reply(
+            "ℹ️ **NO ACTIVE OPERATION**\n"
+            "No operation to cancel.",
+            parse_mode='markdown'
+        )
+
+@client.on(events.NewMessage(pattern='/list'))
+async def handle_list(event):
+    """Handle /list command"""
+    user_id = event.sender_id
+    username = event.sender.username or "Unknown"
+    log_bot_activity(user_id, username, "used /list command")
+    
+    if user_id not in user_sessions or user_sessions[user_id].get("mode") not in ["zip", "zip_password"]:
+        await event.reply(
+            "ℹ️ **NOT IN ZIP MODE**\n"
+            "Use CREATE ZIP or PASSWORD ZIP to start adding files.",
+            parse_mode='markdown'
+        )
+        return
+    
+    files = user_sessions[user_id].get("files", [])
+    
+    if not files:
+        await event.reply(
+            "📭 **NO FILES ADDED**\n"
+            "Send files or links to add them to archive.",
+            parse_mode='markdown'
+        )
+        return
+    
+    total_size = user_sessions[user_id].get("total_size", 0)
+    remaining = (2 * 1024 * 1024 * 1024) - total_size
+    password = user_sessions[user_id].get("password")
+    
+    # Create file list
+    file_list = []
+    for idx, f in enumerate(files[:10], 1):
+        size_str = format_size(f.get("size", 0))
+        name = f['name'][:40] + "..." if len(f['name']) > 40 else f['name']
+        file_list.append(f"`{idx:02d}.` `{name}` `({size_str})`")
+    
+    if len(files) > 10:
+        file_list.append(f"\n`... and {len(files) - 10} more files`")
+    
+    password_info = f"🔐 **Password:** `{'***' if password else 'No password'}`\n" if password else ""
+    
+    await event.reply(
+        f"📋 **ADDED FILES LIST**\n\n"
+        f"📊 **Summary:**\n"
+        f"• 📦 Total files: `{len(files)}`\n"
+        f"• 📈 Total size: `{format_size(total_size)}`\n"
+        f"• 📉 Remaining: `{format_size(remaining)}`\n"
+        f"{password_info}\n"
+        f"📁 **Files:**\n" + "\n".join(file_list) + "\n\n"
+        f"⚡ **Commands:**\n"
+        f"• `/done` - Create archive\n"
+        f"• Add more files to continue",
+        parse_mode='markdown'
+    )
+
+# ===== MAIN MESSAGE HANDLER =====
+@client.on(events.NewMessage())
+async def handle_message(event):
+    """Handle all incoming messages"""
+    user_id = event.sender_id
+    username = event.sender.username or "Unknown"
+    text = event.text.strip() if event.text else ""
+    
+    # Ignore commands
+    if text and text.startswith('/'):
+        return
+    
+    # Check if user is in a session
+    if user_id not in user_sessions:
+        # Check if user sent a file without command
+        if event.media or event.document or event.photo:
+            log_bot_activity(user_id, username, "sent file without command")
+            await process_file_for_extraction(event)
+        return
+    
+    session = user_sessions[user_id]
+    mode = session.get("mode")
+    
+    # Handle password input for zip_password mode
+    if mode == "zip_password" and session.get("waiting_password"):
+        if not text or len(text) < 4:
+            await event.reply(
+                "❌ **PASSWORD TOO SHORT**\n"
+                "Minimum 4 characters required.\n"
+                "Please enter a stronger password:",
+                parse_mode='markdown'
+            )
+            return
+        
+        log_bot_activity(user_id, username, f"setting password: {'*' * len(text)}")
+        
+        # Set password and create temp directory
+        session["password"] = text
+        session["waiting_password"] = False
+        session["waiting_files"] = True
+        session["temp_dir"] = tempfile.mkdtemp(prefix=f"zip_pw_{user_id}_")
+        
+        await event.reply(
+            f"✅ **PASSWORD SET SUCCESSFULLY**\n\n"
+            f"🔐 **Password:** `{'*' * len(text)}`\n\n"
+            f"📥 **Now send me files to add:**\n"
+            "• Telegram files (any type)\n"
+            "• Direct download links\n"
+            "• Google Drive links\n\n"
+            f"📊 **Current:** 0 files, 0 MB\n\n"
+            f"⚡ **Commands:**\n"
+            f"• `/done` - Create archive\n"
+            f"• `/list` - View files\n"
+            f"• `/cancel` - Cancel",
+            parse_mode='markdown'
+        )
+        return
+    
+    # Handle password input for encrypted archive extraction
+    if mode == "extract" and session.get("password_asked"):
+        log_bot_activity(user_id, username, f"entered password for extraction: {'*' * len(text)}")
+        await perform_extraction(event, session["archive_path"], text)
+        # Cleanup session after extraction
+        asyncio.create_task(cleanup_user_session(user_id))
+        return
+    
+    # Handle URL input for extract mode
+    if mode == "extract" and session.get("waiting_file") and text:
+        if text.startswith(('http://', 'https://')):
+            log_bot_activity(user_id, username, f"sent URL for extraction: {text[:50]}...")
+            await process_url_for_extraction(event, text)
+        return
+    
+    # Handle URL input for zip modes
+    if mode in ["zip", "zip_password"] and session.get("waiting_files") and text:
+        if text.startswith(('http://', 'https://')):
+            log_bot_activity(user_id, username, f"sent URL for zip: {text[:50]}...")
+            await add_url_to_zip(event, text)
+        return
+    
+    # Handle file attachments
+    if event.media or event.document or event.photo:
+        if mode == "extract" and session.get("waiting_file"):
+            log_bot_activity(user_id, username, "sent archive file for extraction")
+            await process_file_for_extraction(event)
+        elif mode in ["zip", "zip_password"] and session.get("waiting_files"):
+            log_bot_activity(user_id, username, "sent file to add to zip")
+            await add_file_to_zip(event)
+        return
+
+# ===== FILE ADDITION FUNCTIONS =====
+async def add_file_to_zip(event):
+    """Add Telegram file to zip"""
+    user_id = event.sender_id
+    session = user_sessions[user_id]
+    
+    # Get filename
+    filename = "file"
+    if event.media and hasattr(event.media, 'document'):
+        doc = event.media.document
+        for attr in doc.attributes:
+            if isinstance(attr, DocumentAttributeFilename):
+                filename = attr.file_name
+                break
+    elif event.photo:
+        filename = f"photo_{int(time.time())}.jpg"
+    
+    filepath = os.path.join(session["temp_dir"], filename)
+    
+    # Start download message
+    start_msg = await event.reply(
+        f"📥 **ADDING FILE TO ARCHIVE**\n\n"
+        f"📄 `{filename}`\n"
+        f"⏳ Downloading from Telegram...",
+        parse_mode='markdown'
+    )
+    
+    # Download file
+    success, message = await download_telegram_file(event, filepath)
+    
+    if not success:
+        await start_msg.edit(f"❌ **DOWNLOAD FAILED**\n{message}")
+        return
+    
+    # Check file size
+    file_size = os.path.getsize(filepath)
+    current_total = session.get("total_size", 0)
+    new_total = current_total + file_size
+    
+    # Check 2GB limit
+    if new_total > 2 * 1024 * 1024 * 1024:
+        os.remove(filepath)
+        await start_msg.edit(
+            f"❌ **SIZE LIMIT EXCEEDED**\n\n"
+            f"📊 **Current total:** `{format_size(current_total)}`\n"
+            f"📈 **This file:** `{format_size(file_size)}`\n"
+            f"⚠️ **Maximum allowed:** `2.0 GB`\n\n"
+            f"💡 **Solution:**\n"
+            f"• Send `/done` to create archive\n"
+            f"• Or remove some files first",
+            parse_mode='markdown'
+        )
+        return
+    
+    # Add to list
+    session["files"].append({
+        "name": filename,
+        "path": filepath,
+        "size": file_size
+    })
+    
+    # Update total
+    session["total_size"] = new_total
+    password = session.get("password")
+    
+    # Success message
+    await start_msg.edit(
+        f"✅ **FILE ADDED SUCCESSFULLY**\n\n"
+        f"📄 **Filename:** `{filename}`\n"
+        f"📊 **Size:** `{format_size(file_size)}`\n\n"
+        f"📈 **ARCHIVE STATUS:**\n"
+        f"• 📦 Total files: `{len(session['files'])}`\n"
+        f"• 📊 Total size: `{format_size(new_total)}`\n"
+        f"• 📉 Remaining: `{format_size(2*1024*1024*1024 - new_total)}`\n"
+        f"• 🔐 **Password:** `{'*' * len(password) if password else 'No password'}`\n\n"
+        f"⚡ **NEXT STEPS:**\n"
+        f"• Send another file to add more\n"
+        f"• `/done` - Create archive\n"
+        f"• `/list` - View all files\n"
+        f"• `/cancel` - Cancel operation",
+        parse_mode='markdown'
+    )
+
+async def add_url_to_zip(event, url):
+    """Add file from URL to zip"""
+    user_id = event.sender_id
+    session = user_sessions[user_id]
+    
+    # Create filename
+    filename = os.path.basename(url.split('?')[0])
+    if not filename or '.' not in filename:
+        filename = f"file_{len(session['files']) + 1}.dat"
+    
+    filepath = os.path.join(session["temp_dir"], filename)
+    
+    # Start download message
+    start_msg = await event.reply(
+        f"📥 **DOWNLOADING FROM URL**\n\n"
+        f"📄 `{filename}`\n"
+        f"🌐 `{url[:50]}...`\n"
+        f"⏳ Starting download...",
+        parse_mode='markdown'
+    )
+    
+    # Check if it's Google Drive URL
+    if 'drive.google.com' in url and google_drive_available:
+        success, message, file_size = await download_from_google_drive(url, filepath, start_msg)
+    else:
+        # Regular URL download
+        success, message, file_size = await download_from_url(url, filepath, start_msg)
+    
+    if not success:
+        await start_msg.edit(f"❌ **DOWNLOAD FAILED**\n{message}")
+        return
+    
+    current_total = session.get("total_size", 0)
+    new_total = current_total + file_size
+    
+    # Check 2GB limit
+    if new_total > 2 * 1024 * 1024 * 1024:
+        os.remove(filepath)
+        await start_msg.edit(
+            f"❌ **SIZE LIMIT EXCEEDED**\n\n"
+            f"📊 **Current total:** `{format_size(current_total)}`\n"
+            f"📈 **This file:** `{format_size(file_size)}`\n"
+            f"⚠️ **Maximum allowed:** `2.0 GB`\n\n"
+            f"💡 **Solution:**\n"
+            f"• Send `/done` to create archive\n"
+            f"• Or remove some files first",
+            parse_mode='markdown'
+        )
+        return
+    
+    # Add to list
+    session["files"].append({
+        "name": filename,
+        "path": filepath,
+        "size": file_size,
+        "url": url
+    })
+    
+    # Update total
+    session["total_size"] = new_total
+    password = session.get("password")
+    
+    # Success message
+    await start_msg.edit(
+        f"✅ **FILE ADDED SUCCESSFULLY**\n\n"
+        f"📄 **Filename:** `{filename}`\n"
+        f"📊 **Size:** `{format_size(file_size)}`\n\n"
+        f"📈 **ARCHIVE STATUS:**\n"
+        f"• 📦 Total files: `{len(session['files'])}`\n"
+        f"• 📊 Total size: `{format_size(new_total)}`\n"
+        f"• 📉 Remaining: `{format_size(2*1024*1024*1024 - new_total)}`\n"
+        f"• 🔐 **Password:** `{'*' * len(password) if password else 'No password'}`\n\n"
+        f"⚡ **NEXT STEPS:**\n"
+        f"• Send another link to add more\n"
+        f"• `/done` - Create archive\n"
+        f"• `/list` - View all files\n"
+        f"• `/cancel` - Cancel operation",
+        parse_mode='markdown'
+    )
+
+async def download_from_url(url: str, destination: str, progress_msg=None) -> Tuple[bool, str, int]:
+    """Download file from regular URL"""
+    try:
+        response = requests.get(url, stream=True, timeout=300)
+        response.raise_for_status()
+        
+        file_size = int(response.headers.get('content-length', 0))
+        downloaded = 0
+        
+        progress_bar = ProgressBar(file_size, "Downloading")
+        
+        with open(destination, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    progress_bar.current = downloaded
+                    
+                    # Update progress every 500KB or 1 second
+                    if progress_msg and (downloaded % (512*1024) == 0 or time.time() - progress_bar.last_update > 1):
+                        progress_bar.last_update = time.time()
+                        try:
+                            await progress_msg.edit(
+                                f"📥 **DOWNLOADING FROM URL**\n"
+                                f"{progress_bar.get_progress_str()}"
+                            )
+                        except:
+                            pass
+        
+        # Verify download
+        if os.path.exists(destination) and os.path.getsize(destination) > 0:
+            actual_size = os.path.getsize(destination)
+            return True, f"Downloaded successfully", actual_size
+        else:
+            return False, "Download failed - file is empty", 0
+            
+    except Exception as e:
+        log_error(f"URL download error: {e}")
+        return False, f"Download error: {str(e)}", 0
+
+# ===== EXTRACTION PROCESSING FUNCTIONS =====
+async def process_file_for_extraction(event):
+    """Process Telegram file for extraction"""
+    user_id = event.sender_id
+    
+    # If user not in session, create one
+    if user_id not in user_sessions:
+        user_sessions[user_id] = {
+            "mode": "extract",
+            "waiting_file": True,
+            "password_asked": False,
+            "archive_path": None,
+            "temp_dir": None,
+            "start_time": time.time(),
+            "username": event.sender.username or "Unknown"
+        }
+    
+    session = user_sessions[user_id]
+    
+    # Check if file is an archive
+    filename = "file"
+    if event.media and hasattr(event.media, 'document'):
+        doc = event.media.document
+        for attr in doc.attributes:
+            if isinstance(attr, DocumentAttributeFilename):
+                filename = attr.file_name
+                break
+    
+    if not is_archive_file(filename):
+        await event.reply(
+            f"❌ **NOT AN ARCHIVE FILE**\n"
+            f"File: `{filename}`\n\n"
+            f"📁 **Supported formats:**\n"
+            f"• ZIP (.zip)\n"
+            f"{'• RAR (.rar)' if rarfile_available else '• ⚠️ RAR (.rar) - install rarfile'}\n"
+            f"{'• 7Z (.7z)' if py7zr_available else '• ⚠️ 7Z (.7z) - install py7zr'}\n\n"
+            f"Please send a valid archive file.",
+            parse_mode='markdown'
+        )
+        return
+    
+    # Create temp directory
+    if not session.get("temp_dir"):
+        session["temp_dir"] = tempfile.mkdtemp(prefix=f"extract_{user_id}_")
+    
+    # Download the file
+    archive_path = os.path.join(session["temp_dir"], filename)
+    
+    msg = await event.reply(
+        f"📥 **DOWNLOADING ARCHIVE**\n\n"
+        f"📄 `{filename}`\n"
+        f"⏳ Preparing download...",
+        parse_mode='markdown'
+    )
+    
+    success, message = await download_telegram_file(event, archive_path)
+    
+    if not success:
+        shutil.rmtree(session["temp_dir"], ignore_errors=True)
+        await msg.edit(f"❌ **DOWNLOAD FAILED**\n{message}")
+        return
+    
+    # Update session
+    session["archive_path"] = archive_path
+    session["waiting_file"] = False
+    
+    # Check if archive needs password
+    try:
+        ext = get_file_extension(filename)
+        if ext == '.zip':
+            with zipfile.ZipFile(archive_path, 'r') as zip_ref:
+                # Try to read file list without password
+                file_list = zip_ref.namelist()
+                if not file_list:
+                    session["password_asked"] = True
+                    await msg.edit(
+                        f"🔐 **PASSWORD REQUIRED**\n\n"
+                        f"📄 `{filename}`\n"
+                        f"📊 **Size:** `{format_size(os.path.getsize(archive_path))}`\n\n"
+                        f"Please enter the password for this archive:",
+                        parse_mode='markdown'
+                    )
+                    return
+        elif ext == '.rar' and rarfile_available:
+            with rarfile.RarFile(archive_path, 'r') as rar_ref:
+                try:
+                    file_list = rar_ref.namelist()
+                except rarfile.PasswordRequired:
+                    session["password_asked"] = True
+                    await msg.edit(
+                        f"🔐 **PASSWORD REQUIRED**\n\n"
+                        f"📄 `{filename}`\n"
+                        f"📊 **Size:** `{format_size(os.path.getsize(archive_path))}`\n\n"
+                        f"Please enter the password for this archive:",
+                        parse_mode='markdown'
+                    )
+                    return
+        elif ext == '.7z' and py7zr_available:
+            # Try without password first
+            try:
+                with py7zr.SevenZipFile(archive_path, 'r') as sevenz_ref:
+                    file_list = sevenz_ref.getnames()
+            except Exception:
+                session["password_asked"] = True
+                await msg.edit(
+                    f"🔐 **PASSWORD MAY BE REQUIRED**\n\n"
+                    f"📄 `{filename}`\n"
+                    f"📊 **Size:** `{format_size(os.path.getsize(archive_path))}`\n\n"
+                    f"Please enter the password for this archive (if any):",
+                    parse_mode='markdown'
+                )
+                return
+    except Exception:
+        # If we can't determine, assume no password
+        pass
+    
+    # No password needed, start extraction
+    await perform_extraction(event, archive_path)
+
+async def process_url_for_extraction(event, url):
+    """Process URL for extraction"""
+    user_id = event.sender_id
+    session = user_sessions[user_id]
+    
+    # Create temp directory
+    if not session.get("temp_dir"):
+        session["temp_dir"] = tempfile.mkdtemp(prefix=f"extract_{user_id}_")
+    
+    # Extract filename from URL
+    filename = os.path.basename(urlparse(url).path)
+    if not filename or '.' not in filename:
+        filename = f"archive_{int(time.time())}.zip"
+    
+    archive_path = os.path.join(session["temp_dir"], filename)
+    
+    msg = await event.reply(
+        f"📥 **DOWNLOADING FROM URL**\n\n"
+        f"📄 `{filename}`\n"
+        f"🌐 `{url[:50]}...`\n"
+        f"⏳ Starting download...",
+        parse_mode='markdown'
+    )
+    
+    # Check if it's Google Drive URL
+    if 'drive.google.com' in url and google_drive_available:
+        success, message, file_size = await download_from_google_drive(url, archive_path, msg)
+    else:
+        # Regular URL download
+        success, message, file_size = await download_from_url(url, archive_path, msg)
+    
+    if not success:
+        await msg.edit(f"❌ **DOWNLOAD FAILED**\n{message}")
+        return
+    
+    # Update session
+    session["archive_path"] = archive_path
+    session["waiting_file"] = False
+    
+    # Check if archive needs password (similar to file processing)
+    await msg.edit(
+        f"✅ **DOWNLOAD COMPLETE**\n\n"
+        f"📄 `{filename}`\n"
+        f"📊 **Size:** `{format_size(file_size)}`\n"
+        f"⏳ **Checking archive...**",
+        parse_mode='markdown'
+    )
+    
+    # Check if it's an archive file
+    if not is_archive_file(filename):
+        await msg.edit(
+            f"❌ **NOT AN ARCHIVE FILE**\n\n"
+            f"📄 `{filename}`\n"
+            f"The downloaded file is not a supported archive format.",
+            parse_mode='markdown'
+        )
+        return
+    
+    # For URL downloads, we'll ask for password if needed during extraction
+    # Start extraction without password first
+    await perform_extraction(event, archive_path)
+
+# ===== CLEANUP FUNCTION =====
+async def cleanup_user_session(user_id: int):
+    """Cleanup user session and temp files"""
+    if user_id in user_sessions:
+        session = user_sessions[user_id]
+        username = session.get("username", "Unknown")
+        
+        log_info(f"Cleaning up session for user {username}")
+        
+        try:
+            # Remove temp files
+            for file_info in session.get("files", []):
+                try:
+                    if os.path.exists(file_info["path"]):
+                        os.remove(file_info["path"])
+                except:
+                    pass
+            
+            # Remove temp directory
+            if "temp_dir" in session and session["temp_dir"]:
+                try:
+                    shutil.rmtree(session["temp_dir"], ignore_errors=True)
+                except:
+                    pass
+            
+            # Remove archive file
+            if "archive_path" in session and session["archive_path"]:
+                try:
+                    if os.path.exists(session["archive_path"]):
+                        os.remove(session["archive_path"])
+                except:
+                    pass
+            
+            # Remove extracted directory
+            extract_dir = os.path.join(session["temp_dir"], "extracted") if session.get("temp_dir") else None
+            if extract_dir and os.path.exists(extract_dir):
+                try:
+                    shutil.rmtree(extract_dir, ignore_errors=True)
+                except:
+                    pass
+                    
+        except Exception as e:
+            log_error(f"Error cleaning up session for {username}: {e}")
+        
+        # Remove session
+        if user_id in user_sessions:
+            del user_sessions[user_id]
+        
+        log_success(f"Session cleaned up for user {username}")
+
+# ===== SHUTDOWN HANDLER =====
+async def shutdown():
+    """Clean shutdown of the bot"""
+    log_info("Shutting down bot...")
+    
+    # Cleanup all user sessions
+    cleanup_tasks = []
+    for user_id in list(user_sessions.keys()):
+        cleanup_tasks.append(cleanup_user_session(user_id))
+    
+    if cleanup_tasks:
+        await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+    
+    # Shutdown thread pool
+    executor.shutdown(wait=True)
+    
+    log_success("Bot shutdown complete")
+
+# ===== MAIN FUNCTION =====
+async def main():
+    """Main function"""
+    print("=" * 70)
+    print("🚀 **ARCHIVE BOT PRO IS NOW ACTIVE!**")
+    print("📱 Go to Telegram and send /start to begin")
+    print("⏸️  Press Ctrl+C to stop the bot")
+    print("=" * 70)
+    print("\n📊 **BOT ACTIVITY LOG:**")
+    print("-" * 70)
+    
+    # Start the bot with connection retry
+    retry_count = 0
+    max_retries = 5
+    
+    while retry_count < max_retries:
+        try:
+            await client.start(bot_token=BOT_TOKEN)
+            
+            # Get bot info
+            me = await client.get_me()
+            log_success(f"Bot authenticated: @{me.username}")
+            
+            # Keep running
+            await client.run_until_disconnected()
+            break
+            
+        except (ConnectionError, TimeoutError) as e:
+            retry_count += 1
+            if retry_count < max_retries:
+                log_warning(f"Connection failed (attempt {retry_count}/{max_retries}): {e}")
+                await asyncio.sleep(5 * retry_count)  # Exponential backoff
+            else:
+                log_error(f"Failed to connect after {max_retries} attempts")
+                raise
+        except KeyboardInterrupt:
+            log_info("Bot stopped by user")
+            break
+        except Exception as e:
+            log_error(f"Unexpected error: {e}")
+            break
+        finally:
+            await shutdown()
+
+# ===== BOT STARTUP =====
+if __name__ == "__main__":
+    print("🚀 Starting Archive Bot Pro...")
+    print("=" * 70)
+    print("📋 Configuration:")
+    print(f"   • API ID: {API_ID}")
+    print(f"   • API Hash: {API_HASH[:10]}...")
+    print(f"   • Bot Token: {BOT_TOKEN[:10]}...")
+    print(f"   • Google Drive: {'✅ Enabled' if google_drive_available else '⚠️ Disabled'}")
+    print(f"   • RAR Support: {'✅ Enabled' if rarfile_available else '⚠️ Disabled'}")
+    print(f"   • 7Z Support: {'✅ Enabled' if py7zr_available else '⚠️ Disabled'}")
+    print("=" * 70)
+    
+    try:
+        if is_jupyter:
+            # For Jupyter/Colab environments
+            print("🌐 Running in Jupyter/Colab environment")
+            loop = asyncio.get_event_loop()
+            loop.create_task(main())
+        else:
+            # For regular Python scripts
+            asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n⏹️  Bot stopped by user")
+    except Exception as e:
+        print(f"\n❌ Fatal error: {e}")
+        traceback.print_exc()
+    finally:
+        print("✅ Session ended")

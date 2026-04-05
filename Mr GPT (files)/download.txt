@@ -1,0 +1,697 @@
+def task6_download_video(url, chat_id, context_data=None, callback_query=None):
+    """Universal video downloader using yt-dlp - YouTube-specific audio merging with audio formats"""
+    import os, time, tempfile, logging, json, subprocess, sys, re, shutil, yt_dlp, threading, requests
+    from __main__ import send_telegram_message, upload_to_drive, logger, TOKEN
+    
+    def log_progress(text, send_to_telegram=True):
+        logger.info(f"[DOWNLOAD] {text}")
+        if send_to_telegram:
+            send_telegram_message(chat_id, f"<b>{text}</b>")
+    
+    def send_telegram_api(method, data):
+        """Send request to Telegram API"""
+        try:
+            response = requests.post(
+                f"https://api.telegram.org/bot{TOKEN}/{method}",
+                json=data,
+                timeout=10
+            )
+            return response.json()
+        except Exception as e:
+            logger.error(f"[TELEGRAM API] Error: {e}")
+            return None
+    
+    def edit_message_text(chat_id, message_id, text, reply_markup=None):
+        """Edit a message"""
+        data = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+            "parse_mode": "HTML"
+        }
+        if reply_markup:
+            data["reply_markup"] = reply_markup
+        return send_telegram_api("editMessageText", data)
+    
+    def send_message(chat_id, text, reply_markup=None):
+        """Send a message"""
+        data = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML"
+        }
+        if reply_markup:
+            data["reply_markup"] = reply_markup
+        return send_telegram_api("sendMessage", data)
+    
+    def answer_callback_query(callback_query_id, text=None, show_alert=False):
+        """Answer a callback query"""
+        data = {
+            "callback_query_id": callback_query_id
+        }
+        if text:
+            data["text"] = text
+        if show_alert:
+            data["show_alert"] = show_alert
+        return send_telegram_api("answerCallbackQuery", data)
+    
+    class DownloadManager:
+        """Manages download sessions"""
+        def __init__(self, chat_id, url, message_id=None, is_youtube=False):
+            self.chat_id = chat_id
+            self.url = url
+            self.formats = []
+            self.info = None
+            self.message_id = message_id
+            self.current_page = 0
+            self.formats_per_page = 8
+            self.last_activity = time.time()
+            self.is_youtube = is_youtube  # Track if it's YouTube
+        
+        def update_activity(self):
+            """Update last activity time"""
+            self.last_activity = time.time()
+        
+        def is_expired(self):
+            """Check if session expired (5 minutes)"""
+            return time.time() - self.last_activity > 300
+        
+        def get_formats_slice(self):
+            """Get formats for current page"""
+            start = self.current_page * self.formats_per_page
+            end = start + self.formats_per_page
+            return self.formats[start:end]
+        
+        def create_keyboard(self):
+            """Create inline keyboard for current page"""
+            if not self.formats:
+                return {"inline_keyboard": [[{"text": "❌ No formats available", "callback_data": "dl_none"}]]}
+            
+            keyboard = []
+            formats_slice = self.get_formats_slice()
+            
+            # Add format buttons in rows of 2
+            for i, fmt in enumerate(formats_slice):
+                idx = (self.current_page * self.formats_per_page) + i + 1
+                btn_text = f"{idx}. {fmt['label'][:20]}..."
+                if len(keyboard) == 0 or len(keyboard[-1]) >= 2:
+                    keyboard.append([])
+                keyboard[-1].append({"text": btn_text, "callback_data": f"dl_fmt_{idx}"})
+            
+            # Add navigation buttons if multiple pages
+            total_pages = (len(self.formats) + self.formats_per_page - 1) // self.formats_per_page
+            
+            if total_pages > 1:
+                nav_buttons = []
+                
+                if self.current_page > 0:
+                    nav_buttons.append({"text": "◀️ Prev", "callback_data": "dl_page_prev"})
+                
+                nav_buttons.append({"text": f"📄 {self.current_page + 1}/{total_pages}", 
+                                   "callback_data": "dl_page_info"})
+                
+                if self.current_page < total_pages - 1:
+                    nav_buttons.append({"text": "Next ▶️", "callback_data": "dl_page_next"})
+                
+                if nav_buttons:
+                    keyboard.append(nav_buttons)
+            
+            # Add cancel button
+            keyboard.append([{"text": "❌ Cancel Download", "callback_data": "dl_cancel"}])
+            
+            return {"inline_keyboard": keyboard}
+        
+        def create_formats_message(self):
+            """Create the formats selection message"""
+            if not self.formats or not self.info:
+                return "<b>❌ No formats available for this video.</b>"
+            
+            total_pages = (len(self.formats) + self.formats_per_page - 1) // self.formats_per_page
+            formats_slice = self.get_formats_slice()
+            start_idx = (self.current_page * self.formats_per_page) + 1
+            
+            title = self.info.get('title', 'Unknown Video')[:60]
+            duration = self.info.get('duration', 0)
+            mins = duration // 60
+            secs = duration % 60
+            
+            source_domain = self.url.split('/')[2] if len(self.url.split('/')) > 2 else self.url
+            
+            message = f"""
+<b>🎬 Video Downloader</b>
+
+<b>Title:</b> {title}
+<b>Duration:</b> {mins}:{secs:02d}
+<b>Source:</b> {source_domain}
+<b>Formats:</b> {len(self.formats)} available
+
+<b>📋 Available Formats (Page {self.current_page + 1}/{total_pages}):</b>
+"""
+            
+            for i, fmt in enumerate(formats_slice):
+                idx = start_idx + i
+                size_str = ""
+                if fmt.get('filesize'):
+                    size_mb = fmt['filesize'] / (1024 * 1024)
+                    size_str = f" ({size_mb:.1f} MB)"
+                
+                # Add indicator for YouTube video-only formats
+                if self.is_youtube and fmt.get('type') == 'video' and not fmt.get('has_audio', True):
+                    message += f"\n<b>{idx}.</b> {fmt['label']}{size_str} 📹"
+                elif fmt.get('type') == 'audio':
+                    message += f"\n<b>{idx}.</b> {fmt['label']}{size_str} 🎵"
+                else:
+                    message += f"\n<b>{idx}.</b> {fmt['label']}{size_str}"
+            
+            message += f"\n\n<b>Click a button to select format (1-{len(self.formats)}):</b>"
+            
+            if self.is_youtube:
+                message += f"\n<i>Note: 📹 formats will be automatically merged with audio</i>"
+            
+            return message
+        
+        def send_formats_menu(self):
+            """Send the formats menu"""
+            message = self.create_formats_message()
+            keyboard = self.create_keyboard()
+            
+            result = send_message(self.chat_id, message, keyboard)
+            if result and result.get('ok'):
+                self.message_id = result['result']['message_id']
+                self.update_activity()
+                return True
+            return False
+        
+        def update_formats_menu(self):
+            """Update the formats menu"""
+            if not self.message_id:
+                return False
+            
+            message = self.create_formats_message()
+            keyboard = self.create_keyboard()
+            
+            self.update_activity()
+            return edit_message_text(self.chat_id, self.message_id, message, keyboard)
+        
+        def handle_callback(self, callback_data, callback_query_id):
+            """Handle callback queries"""
+            self.update_activity()
+            
+            if callback_data == "dl_cancel":
+                answer_callback_query(callback_query_id, "Download cancelled", False)
+                edit_message_text(self.chat_id, self.message_id, "<b>❌ Download cancelled.</b>")
+                return "cancelled"
+            
+            elif callback_data == "dl_page_prev":
+                if self.current_page > 0:
+                    self.current_page -= 1
+                    self.update_formats_menu()
+                answer_callback_query(callback_query_id)
+                return "navigation"
+            
+            elif callback_data == "dl_page_next":
+                total_pages = (len(self.formats) + self.formats_per_page - 1) // self.formats_per_page
+                if self.current_page < total_pages - 1:
+                    self.current_page += 1
+                    self.update_formats_menu()
+                answer_callback_query(callback_query_id)
+                return "navigation"
+            
+            elif callback_data.startswith("dl_fmt_"):
+                try:
+                    format_num = int(callback_data.split("_")[2])
+                    if 1 <= format_num <= len(self.formats):
+                        selected_format = self.formats[format_num - 1]
+                        answer_callback_query(callback_query_id, f"Selected: {selected_format['label']}", False)
+                        
+                        # Update message to show selection
+                        edit_message_text(
+                            self.chat_id,
+                            self.message_id,
+                            f"<b>✅ Format {format_num} selected: {selected_format['label']}</b>\n\n⬇️ Starting download...\n\n<i>This may take a few minutes...</i>"
+                        )
+                        
+                        # Start download in background thread
+                        threading.Thread(target=self.start_download, args=(selected_format,)).start()
+                        return "started"
+                    else:
+                        answer_callback_query(callback_query_id, "Invalid format number", True)
+                        return "error"
+                except Exception as e:
+                    logger.error(f"[CALLBACK] Error: {e}")
+                    answer_callback_query(callback_query_id, "Error processing selection", True)
+                    return "error"
+            
+            elif callback_data == "dl_none":
+                answer_callback_query(callback_query_id, "No formats available", True)
+                return "error"
+            
+            return "ignored"
+        
+        def start_download(self, format_info):
+            """Start download process"""
+            try:
+                downloaded_file = self.download_video(format_info)
+                if downloaded_file:
+                    self.upload_to_drive(downloaded_file, format_info)
+                else:
+                    send_message(self.chat_id, "<b>❌ Download failed. Please try again with a different format.</b>")
+            except Exception as e:
+                log_progress(f"❌ Download error: {str(e)}", True)
+                send_message(self.chat_id, f"<b>❌ Download failed:</b> {str(e)[:200]}")
+        
+        def download_video(self, format_info):
+            """Download video using yt-dlp - YouTube-specific handling"""
+            log_progress(f"⬇️ Downloading {format_info['label']}...", True)
+            
+            start_time = time.time()
+            temp_dir = tempfile.gettempdir()
+            
+            # Check if format is audio-only
+            is_audio_only = format_info.get('type') == 'audio'
+            
+            # Configure yt-dlp based on format type
+            if is_audio_only:
+                # Audio-only download (for all sites)
+                ydl_opts = {
+                    'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
+                    'format': format_info.get('exact_format', format_info['format']),
+                    'quiet': True,
+                    'no_warnings': True,
+                    'retries': 3,
+                    'fragment_retries': 3,
+                    'skip_unavailable_fragments': True,
+                    'continuedl': True,
+                    'noprogress': True,
+                    'concurrent_fragment_downloads': 2,
+                    'http_chunk_size': 1048576,
+                    'postprocessors': [{
+                        'key': 'FFmpegExtractAudio',
+                        'preferredcodec': 'mp3',
+                        'preferredquality': '192',
+                    }]
+                }
+                
+                log_progress(f"🎵 Downloading audio format: {format_info['label']}", True)
+                
+            elif self.is_youtube and format_info.get('type') == 'video' and not format_info.get('has_audio', True):
+                # YouTube video-only format - need to download audio separately and merge
+                log_progress(f"📹 YouTube video-only format detected. Merging with audio...", True)
+                
+                # Create format string: video + audio
+                video_format = format_info.get('exact_format', format_info['format'])
+                format_string = f"{video_format}+bestaudio"
+                
+                ydl_opts = {
+                    'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
+                    'format': format_string,
+                    'quiet': True,
+                    'no_warnings': True,
+                    'retries': 3,
+                    'fragment_retries': 3,
+                    'skip_unavailable_fragments': True,
+                    'continuedl': True,
+                    'noprogress': True,
+                    'concurrent_fragment_downloads': 2,
+                    'http_chunk_size': 1048576,
+                    'merge_output_format': 'mp4',
+                    'postprocessors': [{
+                        'key': 'FFmpegVideoConvertor',
+                        'preferedformat': 'mp4',
+                    }]
+                }
+                
+                log_progress(f"🔗 Merging YouTube video {video_format} with best audio...", True)
+                
+            else:
+                # Standard format with both video and audio (or non-YouTube sites)
+                ydl_opts = {
+                    'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
+                    'format': format_info.get('exact_format', format_info['format']),
+                    'quiet': True,
+                    'no_warnings': True,
+                    'retries': 3,
+                    'fragment_retries': 3,
+                    'skip_unavailable_fragments': True,
+                    'continuedl': True,
+                    'noprogress': True,
+                    'concurrent_fragment_downloads': 2,
+                    'http_chunk_size': 1048576,
+                    'merge_output_format': 'mp4',
+                }
+                
+                if is_audio_only:
+                    # Add audio extraction for audio formats
+                    ydl_opts['postprocessors'] = [{
+                        'key': 'FFmpegExtractAudio',
+                        'preferredcodec': 'mp3',
+                        'preferredquality': '192',
+                    }]
+                elif not format_info.get('type') == 'audio':
+                    # Ensure MP4 output for video formats
+                    ydl_opts['merge_output_format'] = 'mp4'
+            
+            # Platform-specific settings
+            if 'instagram.com' in self.url:
+                ydl_opts['cookiefile'] = None
+            elif 'twitter.com' in self.url or 'x.com' in self.url:
+                ydl_opts['extractor_args'] = {'twitter': {'cards': True}}
+            elif 'tiktok.com' in self.url:
+                ydl_opts['referer'] = 'https://www.tiktok.com/'
+            elif 'facebook.com' in self.url:
+                ydl_opts['referer'] = 'https://www.facebook.com/'
+            
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(self.url, download=True)
+                    
+                    # Get the downloaded filename
+                    downloaded_file = None
+                    for file in os.listdir(temp_dir):
+                        filepath = os.path.join(temp_dir, file)
+                        if os.path.isfile(filepath):
+                            # Check if it's a media file
+                            if any(filepath.lower().endswith(ext) for ext in ['.mp4', '.mkv', '.webm', '.mov', '.avi', '.flv', '.m4a', '.mp3', '.wav']):
+                                # Check if it was recently created
+                                file_age = time.time() - os.path.getmtime(filepath)
+                                if file_age < 300:  # Created in last 5 minutes
+                                    downloaded_file = filepath
+                                    break
+                    
+                    if downloaded_file and os.path.exists(downloaded_file):
+                        elapsed = time.time() - start_time
+                        file_size = os.path.getsize(downloaded_file) / (1024 * 1024)
+                        
+                        log_progress(f"✅ Download complete! ({file_size:.2f} MB in {elapsed:.1f}s)", True)
+                        return downloaded_file
+                    else:
+                        log_progress("❌ Downloaded file not found", True)
+                        return None
+                        
+            except Exception as e:
+                log_progress(f"❌ Download error: {str(e)}", True)
+                import traceback
+                logger.error(f"[YT-DLP DOWNLOAD] Error: {traceback.format_exc()[:500]}")
+                return None
+        
+        def upload_to_drive(self, downloaded_file, format_info):
+            """Upload to Google Drive"""
+            if not downloaded_file or not os.path.exists(downloaded_file):
+                send_message(self.chat_id, "<b>❌ No file to upload.</b>")
+                return
+            
+            try:
+                file_size = os.path.getsize(downloaded_file) / (1024 * 1024)
+                log_progress(f"☁️ Uploading {file_size:.2f} MB to Google Drive...", True)
+                
+                drive_url = upload_to_drive(downloaded_file, self.chat_id)
+                
+                # Clean up
+                try:
+                    os.remove(downloaded_file)
+                    log_progress(f"✅ Cleaned up: {downloaded_file}", False)
+                except:
+                    pass
+                
+                if drive_url:
+                    title = os.path.basename(downloaded_file)[:80]
+                    success_msg = f"""
+<b>✅ Download Complete!</b>
+
+📺 <b>Title:</b> {title}
+📊 <b>Quality:</b> {format_info['label']}
+📦 <b>Size:</b> {file_size:.2f} MB
+
+<b>📁 Google Drive Link:</b>
+{drive_url}
+
+💡 <b>Note:</b> File is now in your Google Drive
+                    """
+                    send_message(self.chat_id, success_msg)
+                else:
+                    send_message(self.chat_id, "<b>❌ Failed to upload to Google Drive.</b>")
+                    
+            except Exception as e:
+                log_progress(f"❌ Upload error: {str(e)}", True)
+                send_message(self.chat_id, f"<b>❌ Upload failed:</b> {str(e)[:200]}")
+    
+    # ============================================
+    # YT-DLP FORMAT EXTRACTION FUNCTIONS
+    # ============================================
+    
+    def install_dependencies():
+        """Install yt-dlp and ffmpeg if needed"""
+        try:
+            import yt_dlp
+            log_progress("✅ yt-dlp is already installed", False)
+        except ImportError:
+            log_progress("📦 Installing yt-dlp...", True)
+            try:
+                subprocess.run([sys.executable, "-m", "pip", "install", "-q", "yt-dlp"], 
+                              capture_output=True, text=True, timeout=60)
+                log_progress("✅ yt-dlp installed", False)
+            except:
+                log_progress("❌ Failed to install yt-dlp", True)
+    
+    def get_available_formats(url):
+        """Get available formats for the video - Now includes audio formats for YouTube"""
+        log_progress(f"🔍 Analyzing video formats...", True)
+        
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': False,
+            'socket_timeout': 15,
+            'no_check_certificate': True,
+        }
+        
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                
+                if not info:
+                    log_progress("❌ Could not extract video info", True)
+                    return None, None, False
+                
+                formats = info.get('formats', [])
+                if not formats:
+                    log_progress("⚠️ No formats found, using default options", True)
+                    # Create default formats
+                    default_formats = [
+                        {
+                            'label': "🎯 Best Quality",
+                            'format': 'best',
+                            'type': 'video',
+                            'height': 1080,
+                            'filesize': 0,
+                            'exact_format': 'best',
+                            'has_audio': True
+                        },
+                        {
+                            'label': "📦 Smallest File",
+                            'format': 'worst',
+                            'type': 'video',
+                            'height': 360,
+                            'filesize': 0,
+                            'exact_format': 'worst',
+                            'has_audio': True
+                        }
+                    ]
+                    return default_formats, info, False
+                
+                # Check if YouTube
+                is_youtube = 'youtube.com' in url or 'youtu.be' in url
+                
+                all_formats = []
+                
+                for fmt in formats:
+                    format_id = fmt.get('format_id', 'unknown')
+                    height = fmt.get('height', 0) or 0
+                    filesize = fmt.get('filesize') or fmt.get('filesize_approx', 0) or 0
+                    
+                    # Check if format has audio (for YouTube only)
+                    has_audio = True  # Default for non-YouTube
+                    if is_youtube:
+                        acodec = fmt.get('acodec', 'none')
+                        has_audio = acodec != 'none' and acodec is not None
+                    
+                    # Create label
+                    size_mb = filesize / (1024*1024) if filesize else 0
+                    size_str = f" ({size_mb:.1f}MB)" if size_mb > 0 else ""
+                    
+                    # Determine format type
+                    if height > 0:
+                        # Video format
+                        if is_youtube and not has_audio:
+                            label = f"{height}p (video){size_str}"
+                        else:
+                            label = f"{height}p{size_str}"
+                        fmt_type = 'video'
+                    elif is_youtube and ('audio only' in fmt.get('format_note', '').lower() or 
+                                         fmt.get('vcodec') == 'none' or 
+                                         (acodec != 'none' and fmt.get('vcodec') == 'none')):
+                        # Audio-only format (YouTube)
+                        abr = fmt.get('abr', 0) or 0
+                        label = f"🎵 Audio {abr}kbps{size_str}"
+                        fmt_type = 'audio'
+                        has_audio = True
+                    else:
+                        # For non-YouTube sites or unknown formats
+                        label = f"Format {format_id}{size_str}"
+                        fmt_type = 'video'
+                        has_audio = True
+                    
+                    all_formats.append({
+                        'label': label,
+                        'format': format_id,
+                        'type': fmt_type,
+                        'height': height,
+                        'filesize': filesize,
+                        'exact_format': format_id,
+                        'has_audio': has_audio
+                    })
+                
+                # Sort formats: best quality first, then audio formats
+                all_formats.sort(key=lambda x: (
+                    -x['height'] if x['height'] else 0,
+                    -x['filesize'] if x['filesize'] else 0,
+                    0 if x['type'] == 'video' else 1  # Audio formats come after video
+                ))
+                
+                # Remove duplicates and organize formats
+                unique_formats = []
+                seen = set()
+                
+                # Always add "Best Quality" option first
+                unique_formats.append({
+                    'label': "🎯 Best Quality",
+                    'format': 'best',
+                    'type': 'video',
+                    'height': 9999,
+                    'filesize': 0,
+                    'exact_format': 'best',
+                    'has_audio': True
+                })
+                
+                # Add video formats (with audio for non-YouTube, video-only for YouTube)
+                for fmt in all_formats:
+                    if fmt['type'] == 'video' and fmt['label'] not in seen:
+                        if len(unique_formats) < 15:  # Limit total formats
+                            seen.add(fmt['label'])
+                            unique_formats.append(fmt)
+                
+                # Add audio formats (only for YouTube)
+                if is_youtube:
+                    audio_count = 0
+                    for fmt in all_formats:
+                        if fmt['type'] == 'audio' and fmt['label'] not in seen:
+                            if len(unique_formats) < 20 and audio_count < 3:  # Limit to 3 audio formats
+                                seen.add(fmt['label'])
+                                unique_formats.append(fmt)
+                                audio_count += 1
+                
+                # Add "Smallest File" option
+                unique_formats.append({
+                    'label': "📦 Smallest File",
+                    'format': 'worst',
+                    'type': 'video',
+                    'height': 360,
+                    'filesize': 0,
+                    'exact_format': 'worst',
+                    'has_audio': True
+                })
+                
+                log_progress(f"✅ Found {len(unique_formats)} formats", False)
+                return unique_formats, info, is_youtube
+                
+        except Exception as e:
+            log_progress(f"❌ Error analyzing video: {str(e)}", True)
+            import traceback
+            logger.error(f"[YT-DLP] Error traceback: {traceback.format_exc()[:500]}")
+            return None, None, False
+    
+    # ============================================
+    # MAIN EXECUTION
+    # ============================================
+    
+    try:
+        # If callback query is provided, handle it
+        if callback_query:
+            callback_data = callback_query.get('data', '')
+            callback_id = callback_query.get('id', '')
+            
+            # Check if we have a manager in context
+            manager = None
+            if context_data:
+                manager = context_data.get('download_manager')
+            
+            if callback_data.startswith("dl_"):
+                if manager and not manager.is_expired():
+                    result = manager.handle_callback(callback_data, callback_id)
+                    if result == "cancelled":
+                        if context_data:
+                            context_data.pop('download_manager', None)
+                    return result
+                else:
+                    answer_callback_query(callback_id, "Session expired. Please start again.", True)
+                    send_message(chat_id, "<b>❌ Download session expired. Please use /download again.</b>")
+                    # Clean up expired manager
+                    if context_data and 'download_manager' in context_data:
+                        context_data.pop('download_manager', None)
+                    return "expired"
+            return "ignored"
+        
+        # Normal flow: start new download
+        if not url:
+            send_message(chat_id, "<b>❌ No URL provided.</b>")
+            return "error"
+        
+        log_progress(f"🎬 Starting download for: {url[:80]}...", True)
+        
+        install_dependencies()
+        
+        # Get available formats
+        formats, info, is_youtube = get_available_formats(url)
+        if not formats or not info:
+            send_message(chat_id, "<b>❌ Could not fetch video formats. The video might be private or unsupported.</b>")
+            return "error"
+        
+        # Create download manager
+        manager = DownloadManager(chat_id, url, is_youtube=is_youtube)
+        manager.formats = formats
+        manager.info = info
+        
+        # Store manager in context if provided
+        if context_data:
+            context_data['download_manager'] = manager
+        
+        # Send formats menu
+        if manager.send_formats_menu():
+            log_progress(f"✅ Formats menu sent with {len(formats)} options", False)
+            return "menu_sent"
+        else:
+            send_message(chat_id, "<b>❌ Could not send formats menu. Please try again.</b>")
+            return "error"
+        
+    except Exception as e:
+        logger.error(f"[DOWNLOAD] Fatal error: {e}")
+        import traceback
+        log_progress(f"❌ Error traceback: {traceback.format_exc()[:500]}", False)
+        send_message(chat_id, f"<b>❌ Download Failed</b>\n\nError: {str(e)[:200]}")
+        return "error"
+
+# ============================================
+# SIMPLIFIED SUPPORT FUNCTIONS
+# ============================================
+
+def start_download_command(url, chat_id):
+    """Start a download command"""
+    return task6_download_video(url, chat_id)
+
+def handle_download_callback(callback_data, callback_query_id, chat_id, message_id, context_data):
+    """Handle download callback"""
+    callback_query = {
+        'data': callback_data,
+        'id': callback_query_id
+    }
+    return task6_download_video(None, chat_id, context_data, callback_query)

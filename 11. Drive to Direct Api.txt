@@ -1,0 +1,590 @@
+#!/usr/bin/env python3
+"""
+Google Drive Direct Link Extractor API - FAST VERSION
+With EXACT same response format as original API
+"""
+
+import os
+import re
+import shutil
+import time
+import json
+import urllib.parse
+import threading
+import subprocess
+import sys
+import logging
+
+# ======================== SYSTEM DEPENDENCY INSTALLATION ========================
+def install_system_dependencies():
+    """Install required system packages"""
+    print("🔧 Setting up Chrome environment...")
+    if not shutil.which("google-chrome"):
+        print("🌐 Installing Google Chrome...")
+        subprocess.run("apt-get update -qq", shell=True, check=False)
+        subprocess.run("apt-get install -y wget unzip xvfb libxi6 libgconf-2-4 libvulkan1 mesa-vulkan-drivers > /dev/null 2>&1", shell=True, check=False)
+        subprocess.run("wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb", shell=True, check=False)
+        subprocess.run("dpkg -i google-chrome-stable_current_amd64.deb > /dev/null 2>&1 || apt-get -fy install > /dev/null 2>&1", shell=True, check=False)
+
+# ======================== PYTHON PACKAGE INSTALLATION ========================
+def install_python_packages():
+    """Install required Python packages"""
+    print("📦 Installing Python packages...")
+    subprocess.run(f"{sys.executable} -m pip install -q selenium==4.24.0 flask pyngrok requests > /dev/null 2>&1", shell=True, check=False)
+
+# Run installations
+print("="*80)
+print("🚀 FAST GOOGLE DRIVE DIRECT LINK EXTRACTOR API")
+print("="*80)
+install_system_dependencies()
+install_python_packages()
+
+# ======================== IMPORTS ========================
+print("\n📚 Importing libraries...")
+try:
+    import requests
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from pyngrok import ngrok, conf
+    from flask import Flask, request, jsonify
+    print("✓ All libraries imported successfully")
+except ImportError as e:
+    print(f"⚠️ Import error: {e}")
+    install_python_packages()
+    import requests
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from pyngrok import ngrok, conf
+    from flask import Flask, request, jsonify
+    print("✓ Libraries imported on second attempt")
+
+# ======================== CONFIGURATION ========================
+NGROK_AUTH_TOKEN = "39VmFyphGzR8RJoXNHniTBZpm2N_7wd37RxebPDe38mJrXULN"  # Replace with your token
+PORT = 5001
+
+# ======================== CHROME SETUP ========================
+def setup_chrome_driver():
+    """Setup ChromeDriver by getting version matching installed Chrome"""
+    print("🔧 Setting up ChromeDriver...")
+    
+    # Get Chrome version
+    try:
+        version_output = os.popen("google-chrome --version").read()
+        chrome_version = re.search(r'(\d+)\.', version_output).group(1)
+        print(f"✓ Detected Chrome version: {chrome_version}")
+    except:
+        chrome_version = "119"  # Fallback
+        print(f"⚠️ Could not detect Chrome version, using fallback: {chrome_version}")
+
+    if not shutil.which("chromedriver"):
+        print(f"🏎️ Downloading ChromeDriver for Chrome v{chrome_version}...")
+        try:
+            # Use Chrome for Testing JSON API to find matching driver
+            subprocess.run("wget -qO- https://googlechromelabs.github.io/chrome-for-testing/known-good-versions-with-downloads.json > versions.json", shell=True, check=False)
+            
+            with open('versions.json') as f:
+                data = json.load(f)
+            
+            driver_url = None
+            for v in data['versions']:
+                if v['version'].startswith(chrome_version + '.'):
+                    for d in v['downloads']['chromedriver']:
+                        if d['platform'] == 'linux64':
+                            driver_url = d['url']
+                            break
+                    if driver_url: break
+            
+            if driver_url:
+                subprocess.run(f"wget -q -O chromedriver.zip '{driver_url}'", shell=True, check=False)
+                subprocess.run("unzip -q -o chromedriver.zip", shell=True, check=False)
+                subprocess.run("mv chromedriver-linux64/chromedriver /usr/bin/chromedriver", shell=True, check=False)
+                subprocess.run("chmod +x /usr/bin/chromedriver", shell=True, check=False)
+                
+                # Clean up
+                for f in ['versions.json', 'chromedriver.zip']:
+                    if os.path.exists(f): os.remove(f)
+                if os.path.exists('chromedriver-linux64'):
+                    shutil.rmtree('chromedriver-linux64', ignore_errors=True)
+                    
+                print(f"✓ ChromeDriver installed successfully")
+            else:
+                print("⚠️ Could not find matching ChromeDriver")
+                
+        except Exception as e:
+            print(f"⚠️ ChromeDriver install error: {e}")
+    
+    # Verify installation
+    if shutil.which('chromedriver'):
+        print(f"✓ ChromeDriver ready: {shutil.which('chromedriver')}")
+        return True
+    return False
+
+# Setup Chrome
+setup_chrome_driver()
+
+# ======================== EXTRACTION FUNCTIONS ========================
+def extract_drive_id(link):
+    """Extract Google Drive file ID from various link formats"""
+    patterns = [
+        r'/file/d/([a-zA-Z0-9_-]+)',
+        r'/d/([a-zA-Z0-9_-]+)',
+        r'id=([a-zA-Z0-9_-]+)',
+        r'([a-zA-Z0-9_-]{33})',
+        r'([a-zA-Z0-9_-]{19})'
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, link)
+        if match: 
+            fid = match.group(1)
+            print(f"✓ Extracted File ID: {fid}")
+            return fid
+    return None
+
+def check_and_click_warning_buttons(driver):
+    """Check for ALL types of Google Drive warning pages and click appropriate buttons"""
+    warning_clicked = False
+    
+    # Method 1: ID-based selector (most common)
+    try:
+        confirm_btn = driver.find_element(By.ID, "uc-download-link")
+        if confirm_btn and confirm_btn.is_displayed():
+            print("📝 Warning page detected (ID selector). Clicking 'Download anyway'...")
+            confirm_btn.click()
+            warning_clicked = True
+            time.sleep(1)
+    except:
+        pass
+    
+    # Method 2: Value-based selector
+    if not warning_clicked:
+        try:
+            confirm_btn = driver.find_element(By.XPATH, "//input[@value='Download anyway']")
+            if confirm_btn and confirm_btn.is_displayed():
+                print("📝 Warning page detected (Value selector). Clicking 'Download anyway'...")
+                confirm_btn.click()
+                warning_clicked = True
+                time.sleep(1)
+        except:
+            pass
+    
+    # Method 3: Link text selector
+    if not warning_clicked:
+        try:
+            confirm_btn = driver.find_element(By.XPATH, "//a[contains(text(), 'Download anyway')]")
+            if confirm_btn and confirm_btn.is_displayed():
+                print("📝 Warning page detected (Link text selector). Clicking 'Download anyway'...")
+                confirm_btn.click()
+                warning_clicked = True
+                time.sleep(1)
+        except:
+            pass
+    
+    # Method 4: Button text selector
+    if not warning_clicked:
+        try:
+            confirm_btn = driver.find_element(By.XPATH, "//button[contains(text(), 'Download anyway')]")
+            if confirm_btn and confirm_btn.is_displayed():
+                print("📝 Warning page detected (Button text selector). Clicking 'Download anyway'...")
+                confirm_btn.click()
+                warning_clicked = True
+                time.sleep(1)
+        except:
+            pass
+    
+    # Method 5: Class-based selector
+    if not warning_clicked:
+        try:
+            confirm_btn = driver.find_element(By.CSS_SELECTOR, ".a-b-c-d")
+            if confirm_btn and confirm_btn.is_displayed() and "download" in confirm_btn.text.lower():
+                print("📝 Warning page detected (Class selector). Clicking button...")
+                confirm_btn.click()
+                warning_clicked = True
+                time.sleep(1)
+        except:
+            pass
+    
+    # Method 6: Virus scan warning
+    if not warning_clicked:
+        try:
+            page_text = driver.find_element(By.TAG_NAME, "body").text
+            if "virus" in page_text.lower() and "scan" in page_text.lower():
+                buttons = driver.find_elements(By.TAG_NAME, "button")
+                for btn in buttons:
+                    if btn.is_displayed() and "download" in btn.text.lower():
+                        print("📝 Virus scan warning detected. Clicking download button...")
+                        btn.click()
+                        warning_clicked = True
+                        time.sleep(1)
+                        break
+        except:
+            pass
+    
+    return warning_clicked
+
+def get_fast_direct_link(file_id):
+    """Capture the final drive.usercontent.google.com link - FAST version"""
+    print(f"\n🚀 Processing File ID: {file_id}")
+    
+    chrome_options = Options()
+    chrome_options.add_argument('--headless=new')
+    chrome_options.add_argument('--no-sandbox')
+    chrome_options.add_argument('--disable-dev-shm-usage')
+    chrome_options.add_argument('--disable-gpu')
+    chrome_options.add_argument('--window-size=1920,1080')
+    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36")
+    
+    chrome_options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
+    
+    driver_path = shutil.which('chromedriver')
+    
+    try:
+        if driver_path:
+            service = Service(driver_path)
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+        else:
+            driver = webdriver.Chrome(options=chrome_options)
+    except Exception as e:
+        print(f"⚠️ ChromeDriver error: {e}")
+        return None
+    
+    try:
+        url = f"https://drive.google.com/uc?export=download&id={file_id}"
+        print(f"🌐 Navigating to: {url}")
+        driver.get(url)
+        
+        print("🔍 Monitoring network traffic for final link...")
+        found_url = None
+        warning_clicked = False
+        
+        for attempt in range(25):
+            try:
+                logs = driver.get_log('performance')
+                for entry in logs:
+                    log_data = json.loads(entry['message'])
+                    params = log_data.get('message', {}).get('params', {})
+                    
+                    request_url = params.get('request', {}).get('url')
+                    if request_url and 'drive.usercontent.google.com' in request_url:
+                        if 'confirm=' in request_url:
+                            found_url = request_url
+                            print(f"✓ Found CONFIRM link in request")
+                            break
+                        if not found_url:
+                            found_url = request_url
+                            print(f"✓ Found request URL")
+                    
+                    response_url = params.get('response', {}).get('url')
+                    if response_url and 'drive.usercontent.google.com' in response_url:
+                        if 'confirm=' in response_url:
+                            found_url = response_url
+                            print(f"✓ Found CONFIRM link in response")
+                            break
+                        if not found_url:
+                            found_url = response_url
+                            print(f"✓ Found response URL")
+            except:
+                pass
+            
+            if found_url and 'confirm=' in found_url:
+                print(f"✅ Confirm link captured after {attempt+1} seconds")
+                break
+            
+            try:
+                current_url = driver.current_url
+                if 'drive.usercontent.google.com' in current_url:
+                    if 'confirm=' in current_url:
+                        found_url = current_url
+                        print(f"✅ Confirm link in current URL after {attempt+1} seconds")
+                        break
+                    if not found_url:
+                        found_url = current_url
+                        print(f"✓ Found URL in address bar")
+            except:
+                pass
+            
+            if not warning_clicked:
+                warning_clicked = check_and_click_warning_buttons(driver)
+            
+            if not found_url:
+                try:
+                    meta_refresh = driver.find_elements(By.XPATH, "//meta[@http-equiv='refresh']")
+                    for meta in meta_refresh:
+                        content = meta.get_attribute('content')
+                        if content and 'url=' in content:
+                            redirect_url = content.split('url=')[1]
+                            if 'drive.usercontent.google.com' in redirect_url:
+                                found_url = redirect_url
+                                print(f"✓ Found in meta refresh")
+                                break
+                except:
+                    pass
+            
+            if found_url and 'confirm=' in found_url:
+                break
+                
+            print(f"⏳ Monitoring... ({attempt+1}/25)", end='\r')
+            time.sleep(1)
+        
+        print(" " * 50, end='\r')
+        
+        if found_url:
+            print(f"✅ Direct link found!")
+            return found_url
+        else:
+            print("❌ No direct link found within 25 seconds")
+            return None
+                    
+    except Exception as e:
+        print(f"⚠️ Browser error: {str(e)}")
+        return None
+    finally:
+        try:
+            driver.quit()
+        except:
+            pass
+
+# ======================== FLASK API - EXACT MATCH FORMAT ========================
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return jsonify({
+        'service': 'Google Drive Direct Link Extractor API - FAST Version',
+        'description': 'EXACT SAME RESPONSE FORMAT AS ORIGINAL API',
+        'endpoints': {
+            '/': 'This documentation',
+            '/extract': 'POST with JSON {"url": "DRIVE_URL"}',
+            '/extract/url': 'GET with ?url=DRIVE_URL',
+            '/extract/<file_id>': 'GET with file ID',
+            '/health': 'Health check'
+        },
+        'note': 'FAST mode (25s max) with complete warning detection',
+        'timestamp': time.time()
+    })
+
+@app.route('/health')
+def health():
+    return jsonify({
+        'status': 'healthy',
+        'service': 'Google Drive Direct Link Extractor - FAST',
+        'chrome': '✅' if shutil.which('google-chrome') else '❌',
+        'chromedriver': '✅' if shutil.which('chromedriver') else '❌',
+        'speed': 'FAST mode (25s max)',
+        'timestamp': time.time()
+    })
+
+@app.route('/extract', methods=['GET', 'POST'])
+def extract():
+    """Extract direct link - EXACT SAME RESPONSE FORMAT AS ORIGINAL"""
+    start_time = time.time()
+    
+    if request.method == 'POST':
+        data = request.get_json(silent=True) or {}
+        drive_url = data.get('url', '')
+    else:
+        drive_url = request.args.get('url', '').strip()
+    
+    if not drive_url:
+        return jsonify({
+            'success': False,
+            'error': 'No Google Drive URL provided',
+            'usage': {
+                'GET': '/extract?url=GOOGLE_DRIVE_URL',
+                'POST': 'POST JSON {"url": "GOOGLE_DRIVE_URL"}'
+            }
+        }), 400
+    
+    print(f"\n📥 FAST extraction for: {drive_url}")
+    
+    file_id = extract_drive_id(drive_url)
+    if not file_id:
+        return jsonify({
+            'success': False,
+            'error': 'Invalid Google Drive URL',
+            'provided_url': drive_url,
+            'message': 'Could not extract file ID from the URL'
+        }), 400
+    
+    direct_link = get_fast_direct_link(file_id)
+    elapsed = round(time.time() - start_time, 2)
+    
+    if direct_link:
+        # EXACT SAME RESPONSE FORMAT AS ORIGINAL API
+        return jsonify({
+            'success': True,
+            'file_id': file_id,
+            'original_url': drive_url,
+            'direct_link': direct_link,
+            'download_command': f'wget --no-check-certificate "{direct_link}" -O downloaded_file',
+            'note': 'EXTRACTED WITH FAST MODE (25s max) - SAME LOGIC AS ORIGINAL',
+            'timestamp': time.time()
+        })
+    else:
+        # EXACT SAME ERROR FORMAT AS ORIGINAL API
+        return jsonify({
+            'success': False,
+            'error': 'Could not extract direct link',
+            'file_id': file_id,
+            'possible_reasons': [
+                'File is not publicly accessible',
+                'File requires login',
+                'Google Drive blocked the request',
+                'File size exceeds Google Drive limits'
+            ],
+            'note': 'FAST MODE EXTRACTION - SAME LOGIC AS ORIGINAL'
+        }), 404
+
+@app.route('/extract/<file_id>', methods=['GET'])
+def extract_by_id(file_id):
+    """Extract direct link from File ID - EXACT SAME RESPONSE FORMAT"""
+    start_time = time.time()
+    
+    if not file_id or len(file_id) < 10:
+        return jsonify({
+            'success': False,
+            'error': 'Invalid File ID format'
+        }), 400
+    
+    print(f"\n📥 FAST extraction for File ID: {file_id}")
+    
+    direct_link = get_fast_direct_link(file_id)
+    elapsed = round(time.time() - start_time, 2)
+    
+    if direct_link:
+        # EXACT SAME RESPONSE FORMAT AS ORIGINAL API
+        return jsonify({
+            'success': True,
+            'file_id': file_id,
+            'original_url': f"https://drive.google.com/file/d/{file_id}/view",
+            'direct_link': direct_link,
+            'download_command': f'wget --no-check-certificate "{direct_link}" -O downloaded_file',
+            'note': 'EXTRACTED WITH FAST MODE (25s max) - SAME LOGIC AS ORIGINAL',
+            'timestamp': time.time()
+        })
+    else:
+        return jsonify({
+            'success': False,
+            'error': 'Could not extract direct link',
+            'file_id': file_id,
+            'note': 'FAST MODE EXTRACTION - SAME LOGIC AS ORIGINAL'
+        }), 404
+
+# ======================== NGROK SETUP ========================
+def setup_ngrok():
+    """Setup ngrok with auth token"""
+    print(f"\n🔐 Setting up ngrok...")
+    
+    try:
+        try:
+            conf.get_default().auth_token = NGROK_AUTH_TOKEN
+        except:
+            ngrok.set_auth_token(NGROK_AUTH_TOKEN)
+        
+        try:
+            ngrok.kill()
+        except:
+            pass
+        
+        tunnel = ngrok.connect(PORT, "http")
+        public_url = tunnel.public_url
+        
+        print(f"✅ Ngrok tunnel created!")
+        print(f"🌐 Public URL: {public_url}")
+        
+        return public_url
+    except Exception as e:
+        print(f"⚠️ Ngrok error: {e}")
+        return None
+
+# ======================== MAIN ========================
+print("\n" + "="*80)
+print("🚀 FAST GOOGLE DRIVE DIRECT LINK EXTRACTOR API")
+print("="*80)
+print("✅ EXACT SAME RESPONSE FORMAT AS ORIGINAL API")
+print("✅ FAST mode (25 seconds max)")
+print("✅ Complete warning page detection")
+print("="*80)
+
+public_url = setup_ngrok()
+
+def run_flask():
+    app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
+
+flask_thread = threading.Thread(target=run_flask, daemon=True)
+flask_thread.start()
+
+time.sleep(2)
+
+print("\n" + "="*80)
+print("📡 API SERVER READY - FAST MODE")
+print("="*80)
+
+if public_url:
+    print(f"\n🔗 YOUR FAST API URL: {public_url}")
+    print(f"\n📌 ENDPOINTS:")
+    print(f"   • Home:      {public_url}/")
+    print(f"   • Health:    {public_url}/health")
+    print(f"   • Extract:   {public_url}/extract?url=YOUR_DRIVE_LINK")
+    print(f"   • By ID:     {public_url}/extract/FILE_ID")
+else:
+    print(f"\n🔗 LOCAL URL: http://localhost:{PORT}")
+    print(f"\n📌 ENDPOINTS:")
+    print(f"   • Home:      http://localhost:{PORT}/")
+    print(f"   • Health:    http://localhost:{PORT}/health")
+    print(f"   • Extract:   http://localhost:{PORT}/extract?url=YOUR_DRIVE_LINK")
+
+print("\n" + "="*80)
+print("✅ EXACT SAME RESPONSE FORMAT AS ORIGINAL:")
+print("="*80)
+print("""
+Success Response:
+{
+    'success': True,
+    'file_id': '1FILE_ID',
+    'original_url': 'https://drive.google.com/file/d/1FILE_ID/view',
+    'direct_link': 'https://drive.usercontent.google.com/...',
+    'download_command': 'wget --no-check-certificate "URL" -O downloaded_file',
+    'note': 'EXTRACTED WITH FAST MODE...',
+    'timestamp': 1234567890.123
+}
+
+Error Response:
+{
+    'success': False,
+    'error': 'Could not extract direct link',
+    'file_id': '1FILE_ID',
+    'possible_reasons': [...],
+    'note': 'FAST MODE EXTRACTION...'
+}
+""")
+
+print("\n" + "="*80)
+print("⏳ FAST API RUNNING - Press Ctrl+C to stop")
+print("="*80)
+
+def keep_alive():
+    while True:
+        time.sleep(30)
+        print(f"⚡ FAST API active... ({time.strftime('%H:%M:%S')})", end='\r')
+
+keep_thread = threading.Thread(target=keep_alive, daemon=True)
+keep_thread.start()
+
+try:
+    while True:
+        time.sleep(1)
+except KeyboardInterrupt:
+    print("\n\n👋 Shutting down...")
+    try:
+        ngrok.kill()
+    except:
+        pass
+    print("✅ Shutdown complete")
